@@ -1,6 +1,5 @@
-torch
-transformers   # v5 needs torch >= 2.5, but Intel Macs top out at torch 2.2.2
-numpy          # torch 2.2.2 was built against numpy 1.x
+torch>=2.6   # older torch can't safely load the BLIP weights from the Hub (CVE-2025-32434)
+transformers
 Pillow
 flask
 flask-limiter

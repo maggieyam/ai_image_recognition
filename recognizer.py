@@ -1,34 +1,11 @@
-from pathlib import Path
+import os
 
 import torch
-from huggingface_hub import hf_hub_download
-from transformers import BlipConfig, BlipForConditionalGeneration, BlipProcessor
+from transformers import BlipForConditionalGeneration, BlipProcessor
 
 BLIP_ID = "Salesforce/blip-image-captioning-base"
-BLIP_LOCAL_DIR = Path(__file__).parent / "models" / "blip-base"
-
-
-def _torch_can_load_bin():
-    major, minor = torch.__version__.split(".")[:2]
-    return (int(major), int(minor)) >= (2, 6)
-
-
-def _blip_weights_source():
-    """
-    The Hub id for the BLIP weights, or a local safetensors copy on older torch.
-
-    transformers refuses to torch.load the Hub's pytorch_model.bin below
-    torch 2.6 (CVE-2025-32434), so older installs convert it once locally.
-    """
-    if _torch_can_load_bin():
-        return BLIP_ID
-    if not (BLIP_LOCAL_DIR / "model.safetensors").exists():
-        bin_path = hf_hub_download(BLIP_ID, "pytorch_model.bin")
-        state = torch.load(bin_path, map_location="cpu", weights_only=True)
-        model = BlipForConditionalGeneration(BlipConfig.from_pretrained(BLIP_ID))
-        model.load_state_dict(state, strict=False)
-        model.save_pretrained(BLIP_LOCAL_DIR)  # writes model.safetensors
-    return BLIP_LOCAL_DIR
+# Optionally load the model weights from a local folder instead of the Hugging Face Hub.
+BLIP_WEIGHTS = os.environ.get("BLIP_WEIGHTS", BLIP_ID)
 
 
 class ImageRecognizer:
@@ -38,7 +15,7 @@ class ImageRecognizer:
 
         self.blip_processor = BlipProcessor.from_pretrained(BLIP_ID)
         self.blip_model = BlipForConditionalGeneration.from_pretrained(
-            _blip_weights_source()
+            BLIP_WEIGHTS
         ).to(self.device)
         self.blip_model.eval()
 

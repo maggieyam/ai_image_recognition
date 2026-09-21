@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+models/
+weights/
+images/
+*.pt
+*.ipynb
+.DS_Store
+.env

@@ -1,0 +1,7 @@
+torch
+transformers<5   # v5 needs torch >= 2.5, but Intel Macs top out at torch 2.2.2
+numpy<2          # torch 2.2.2 was built against numpy 1.x
+Pillow
+flask
+flask-limiter
+gunicorn

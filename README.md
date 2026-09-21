@@ -1,13 +1,3 @@
----
-title: Image Recognizer
-emoji: 🔍
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # Image Recognizer
 
 Find out what's in a picture. Upload an image or paste a screenshot, and get a short plain-English description.

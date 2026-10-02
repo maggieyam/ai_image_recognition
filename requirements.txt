@@ -1,7 +1,12 @@
 torch
-transformers   # v5 needs torch >= 2.5, but Intel Macs top out at torch 2.2.2
-numpy          # torch 2.2.2 was built against numpy 1.x
+# Intel Macs top out at torch 2.2.2: transformers 5 needs torch >= 2.5, and
+# torch 2.2.2 was built against numpy 1.x. 4.56 is the first with Florence-2.
+transformers>=4.56,<5; platform_system == "Darwin" and platform_machine == "x86_64"
+transformers>=4.56; platform_system != "Darwin" or platform_machine != "x86_64"
+numpy<2; platform_system == "Darwin" and platform_machine == "x86_64"
+numpy; platform_system != "Darwin" or platform_machine != "x86_64"
 Pillow
+llama-cpp-python  # builds llama.cpp from source on install
 flask
 flask-limiter
 gunicorn

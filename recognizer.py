@@ -1,11 +1,56 @@
+import re
+import sys
 from pathlib import Path
 
 import torch
 from huggingface_hub import hf_hub_download
-from transformers import BlipConfig, BlipForConditionalGeneration, BlipProcessor
+from PIL import Image
+from transformers import (
+    AutoProcessor,
+    CLIPModel,
+    CLIPProcessor,
+    Florence2ForConditionalGeneration,
+)
 
-BLIP_ID = "Salesforce/blip-image-captioning-base"
-BLIP_LOCAL_DIR = Path(__file__).parent / "models" / "blip-base"
+from sentences import split_sentences
+
+MODELS_DIR = Path(__file__).parent / "models"
+# Replaced BLIP-base: about the same size, but its detailed descriptions say
+# what's actually in the picture, where BLIP often guessed a film title.
+FLORENCE_ID = "florence-community/Florence-2-base"
+CLIP_ID = "openai/clip-vit-base-patch32"
+CLIP_LOCAL_DIR = MODELS_DIR / "clip-vit-base-patch32"
+
+# Zero-shot mood labels. Each mood is scored as the average of CLIP text
+# embeddings over (synonym x template), which is steadier than one prompt.
+MOODS = {
+    "happy": ["happy", "joyful", "cheerful"],
+    "playful": ["playful", "fun", "lighthearted"],
+    "exciting": ["exciting", "energetic", "thrilling"],
+    "peaceful": ["peaceful", "calm", "serene"],
+    "cozy": ["cozy", "warm", "comfortable"],
+    "romantic": ["romantic", "tender", "loving"],
+    "busy": ["busy", "hectic", "crowded"],
+    "lonely": ["lonely", "isolated", "solitary"],
+    "sad": ["sad", "sorrowful", "melancholy"],
+    "gloomy": ["gloomy", "bleak", "dreary"],
+    "tense": ["tense", "scary", "threatening"],
+    "mysterious": ["mysterious", "eerie", "enigmatic"],
+}
+MOOD_TEMPLATES = [
+    "a {} scene.",
+    "a photo of a {} scene.",
+    "a photo that feels {}.",
+    "a {} moment.",
+]
+
+QUOTED = re.compile(r'\s*"[^"]*"')
+STILL_FROM = re.compile(r"\bstill from\b", re.I)
+AT_CAMERA = re.compile(r"\b(?:directly )?(?:at|into|toward|towards) the camera\b")
+# "The image shows ...", "The image is ...", "It shows ..."
+LEAD_IN = re.compile(
+    r"^(?:(?:The|This) (?:image|photo|picture) (?:shows|depicts|is(?: of)?)|It shows)\s+"
+)
 
 
 def _torch_can_load_bin():
@@ -13,22 +58,27 @@ def _torch_can_load_bin():
     return (int(major), int(minor)) >= (2, 6)
 
 
-def _blip_weights_source():
+def _weights_source(hub_id, model_cls, local_dir):
     """
-    The Hub id for the BLIP weights, or a local safetensors copy on older torch.
+    The Hub id for a model's weights, or a local safetensors copy on older torch.
 
     transformers refuses to torch.load the Hub's pytorch_model.bin below
     torch 2.6 (CVE-2025-32434), so older installs convert it once locally.
     """
     if _torch_can_load_bin():
-        return BLIP_ID
-    if not (BLIP_LOCAL_DIR / "model.safetensors").exists():
-        bin_path = hf_hub_download(BLIP_ID, "pytorch_model.bin")
+        return hub_id
+    if not (local_dir / "model.safetensors").exists():
+        bin_path = hf_hub_download(hub_id, "pytorch_model.bin")
         state = torch.load(bin_path, map_location="cpu", weights_only=True)
-        model = BlipForConditionalGeneration(BlipConfig.from_pretrained(BLIP_ID))
+        model = model_cls(model_cls.config_class.from_pretrained(hub_id))
         model.load_state_dict(state, strict=False)
-        model.save_pretrained(BLIP_LOCAL_DIR)  # writes model.safetensors
-    return BLIP_LOCAL_DIR
+        model.save_pretrained(local_dir)  # writes model.safetensors
+    return local_dir
+
+
+def _embedding(features):
+    # transformers 5 wraps the projected embedding in an output object.
+    return features if isinstance(features, torch.Tensor) else features.pooler_output
 
 
 class ImageRecognizer:
@@ -36,22 +86,117 @@ class ImageRecognizer:
         """device: "cuda", "cpu", or None (auto-detect)."""
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.blip_processor = BlipProcessor.from_pretrained(BLIP_ID)
-        self.blip_model = BlipForConditionalGeneration.from_pretrained(
-            _blip_weights_source()
+        self.florence_processor = AutoProcessor.from_pretrained(FLORENCE_ID)
+        self.florence_model = Florence2ForConditionalGeneration.from_pretrained(
+            FLORENCE_ID
         ).to(self.device)
-        self.blip_model.eval()
+        self.florence_model.eval()
+
+        self.clip_processor = CLIPProcessor.from_pretrained(CLIP_ID)
+        self.clip_model = CLIPModel.from_pretrained(
+            _weights_source(CLIP_ID, CLIPModel, CLIP_LOCAL_DIR)
+        ).to(self.device)
+        self.clip_model.eval()
+        # One unit vector per mood, computed once. A linear probe trained on
+        # CLIP image features would replace this matrix (and logit_scale).
+        self.mood_names = list(MOODS)
+        self.mood_vectors = self._embed_moods()
 
         print(f"ImageRecognizer ready (device: {self.device})")
 
     def describe(self, image):
-        """Return a short caption for a PIL image."""
-        inputs = self.blip_processor(image, return_tensors="pt").to(self.device)
+        """
+        Return (caption, description) for a PIL image: one sentence for the
+        page, and a paragraph on who and what is in it, what they wear and
+        the setting, which story ideas start from.
+
+        Both come from Florence-2's most detailed mode. Its short-caption mode
+        guesses titles ("the king's woman china web drama") and invents
+        settings (a beach behind a couple in a city), much like BLIP did.
+        """
+        return _caption_and_description(
+            self._florence(image, "<MORE_DETAILED_CAPTION>", max_new_tokens=160)
+        )
+
+    def match(self, image_vec, texts):
+        """
+        CLIP similarity of each text to an image, given its image_vector()
+        (about 0.15 unrelated, 0.3 a good match).
+        """
+        inputs = self.clip_processor(
+            text=texts, return_tensors="pt", padding=True, truncation=True
+        ).to(self.device)
         with torch.no_grad():
-            # repetition_penalty stops BLIP looping on scenes of one repeated
-            # object ("strawberries, strawberries, ..."). Don't combine it with
-            # num_beams: beam search defeats no_repeat_ngram_size here.
-            out = self.blip_model.generate(
-                **inputs, max_new_tokens=50, repetition_penalty=1.5
-            )
-        return self.blip_processor.decode(out[0], skip_special_tokens=True)
+            text_vecs = _embedding(self.clip_model.get_text_features(**inputs))
+        text_vecs = text_vecs / text_vecs.norm(dim=-1, keepdim=True)
+        return (text_vecs @ image_vec).tolist()
+
+    def moods(self, image, top_k=3):
+        """Return the top_k moods for a PIL image as [(mood, probability), ...]."""
+        image_vec = self.image_vector(image)
+        with torch.no_grad():
+            logits = self.clip_model.logit_scale.exp() * self.mood_vectors @ image_vec
+            probs = logits.softmax(dim=0)
+        top = probs.topk(top_k)
+        return [
+            (self.mood_names[i], round(p, 3))
+            for p, i in zip(top.values.tolist(), top.indices.tolist())
+        ]
+
+    def _florence(self, image, task, max_new_tokens):
+        inputs = self.florence_processor(text=task, images=image, return_tensors="pt").to(
+            self.device
+        )
+        with torch.no_grad():
+            out = self.florence_model.generate(**inputs, max_new_tokens=max_new_tokens)
+        return self.florence_processor.decode(out[0], skip_special_tokens=True).strip()
+
+    def image_vector(self, image):
+        """The unit CLIP embedding of a PIL image."""
+        inputs = self.clip_processor(images=image, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            image_vec = _embedding(self.clip_model.get_image_features(**inputs))[0]
+        return image_vec / image_vec.norm()
+
+    def _embed_moods(self):
+        vectors = []
+        for synonyms in MOODS.values():
+            prompts = [t.format(s) for s in synonyms for t in MOOD_TEMPLATES]
+            inputs = self.clip_processor(
+                text=prompts, return_tensors="pt", padding=True
+            ).to(self.device)
+            with torch.no_grad():
+                text = _embedding(self.clip_model.get_text_features(**inputs))
+            text = text / text.norm(dim=-1, keepdim=True)
+            mean = text.mean(dim=0)
+            vectors.append(mean / mean.norm())
+        return torch.stack(vectors)
+
+
+def _caption_and_description(text):
+    """
+    (caption, description) from Florence-2's detailed description.
+
+    Florence-2 describes film and TV stills as such ('a still from the drama
+    "The King's Woman"', 'looking at the camera'), and the story writer then
+    borrows the quoted title's characters and writes about actors and cameras.
+    So those sentences are dropped and camera glances become "straight ahead".
+    The caption is the first sentence left.
+    """
+    sentences = split_sentences(text)
+    kept = [s for s in sentences if '"' not in s and not STILL_FROM.search(s)]
+    if not kept:  # every sentence named a title: keep them, minus the titles
+        kept = [QUOTED.sub("", s) for s in sentences]
+    description = AT_CAMERA.sub("straight ahead", " ".join(kept))
+    caption = LEAD_IN.sub("", split_sentences(description)[0])
+    return caption[:1].upper() + caption[1:], description
+
+
+if __name__ == "__main__":
+    # Quick look at the pipeline: python recognizer.py images/*.jpg
+    recognizer = ImageRecognizer()
+    for path in sys.argv[1:]:
+        image = Image.open(path).convert("RGB")
+        moods = ", ".join(f"{m} {p:.0%}" for m, p in recognizer.moods(image))
+        caption, description = recognizer.describe(image)
+        print(f"{path}\n  caption: {caption}\n  mood:    {moods}\n  detail:  {description}")

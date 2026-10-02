@@ -27,6 +27,30 @@
   .caption { font-size:18px; }
   .err { color:var(--no); }
   .muted { color:var(--muted); font-size:13px; }
+  .label { margin-top:12px; }
+  .moods { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0; }
+  .chip { padding:5px 10px; border:1px solid var(--line); border-radius:999px; background:transparent;
+          color:var(--text); font:inherit; font-size:13px; cursor:pointer; }
+  .chip[aria-pressed=true] { border-color:var(--accent); background:var(--accent); color:#fff; }
+  .chip .pct { opacity:.7; margin-left:4px; }
+  button.go.alt { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  .row { display:flex; gap:8px; align-items:stretch; }
+  .row .go { flex:1; }
+  .row select { padding:0 8px; border:1px solid var(--line); border-radius:8px; background:var(--card);
+                color:var(--text); font:inherit; }
+  .brainstorm { margin-top:12px; font-size:13px; color:var(--muted); }
+  .brainstorm summary { cursor:pointer; }
+  .brainstorm ul { margin:4px 0 8px; padding-left:18px; }
+  .brainstorm p { margin:4px 0 8px; }
+  .idea { margin-top:12px; padding:12px; border:1px solid var(--line); border-radius:8px; }
+  .idea .tag { font-size:12px; color:var(--muted); margin-bottom:6px; }
+  .story:empty { display:none; }
+  .story { margin-top:4px; }
+  .story h2 { font-size:18px; margin:0 0 8px; }
+  .story h3 { font-size:13px; color:var(--muted); font-weight:600; margin:12px 0 4px; }
+  .story ul { margin:0; padding-left:18px; }
+  .story p { margin:0; }
+  .story .first { font-style:italic; }
 </style>
 </head>
 <body>
@@ -72,23 +96,133 @@ document.addEventListener("paste", (e) => {
   showPreview();
 });
 
+// Shrink big images before uploading them; the server would shrink them to
+// this size anyway. Unreadable files go up as-is for the server to report.
+const MAX_SIDE = 1600;
+async function shrink(file) {
+  let bitmap;
+  try { bitmap = await createImageBitmap(file); } catch { return file; }
+  const scale = MAX_SIDE / Math.max(bitmap.width, bitmap.height);
+  if (scale >= 1) return file;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+  return blob ? new File([blob], "image.jpg", { type: "image/jpeg" }) : file;
+}
+
+// Mood chips pick which mood the story is written in (top one by default).
+// `file` is the image that was described; brainstorming sends it again,
+// with its description.
+function showResult({ caption, description, moods = [] }, file) {
+  const chips = moods.map((m, i) =>
+    `<button type="button" class="chip" data-mood="${esc(m.mood)}" aria-pressed="${i === 0}">`
+    + `${esc(m.mood)}<span class="pct">${Math.round(m.score * 100)}%</span></button>`).join("");
+  result.innerHTML = `<div class="muted">This looks like</div><div class="caption">${esc(caption)}</div>`
+    + `<div class="muted label">Mood — pick one for the story</div><div class="moods">${chips}</div>`
+    + `<div class="row"><button type="button" class="go alt" id="story-go">Brainstorm story ideas</button>`
+    + `<select id="story-count" aria-label="Number of ideas"><option value="1">1 idea</option>`
+    + `<option value="2">2 ideas</option><option value="3" selected>3 ideas</option></select></div>`
+    + `<div class="story" id="story"></div>`;
+
+  result.querySelectorAll(".chip").forEach((chip) => chip.onclick = () =>
+    result.querySelectorAll(".chip").forEach((c) => c.setAttribute("aria-pressed", c === chip)));
+  $("story-go").onclick = () => brainstorm(file, description,
+    result.querySelector(".chip[aria-pressed=true]")?.dataset.mood, $("story-count").value);
+}
+
+// POST a FormData as-is, or anything else as JSON. Errors carry the HTTP
+// status; a proxy or crash can answer with an HTML page instead of JSON.
+async function post(url, body) {
+  const res = await fetch(url, body instanceof FormData ? { method: "POST", body } : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const message = json.error || `Something went wrong (error ${res.status}). Please try again.`;
+    throw Object.assign(new Error(message), { status: res.status });
+  }
+  return json;
+}
+
+// Plan first (brainstorm + pick), then write each picked idea in turn so
+// results show up one by one instead of after the whole batch. An idea the
+// writer can't manage (422) is swapped for a spare rather than asked again.
+async function brainstorm(file, description, mood, count) {
+  const go = $("story-go"), out = $("story");
+  go.disabled = true; go.textContent = "Brainstorming…";
+  out.innerHTML = '<span class="muted">Brainstorming… this takes a while.</span>';
+  try {
+    const form = new FormData();
+    form.append("file", file); form.append("description", description);
+    form.append("mood", mood); form.append("count", count);
+    const { options, rejected, ideas, spares } = await post("/story/plan", form);
+    const list = (values) => `<ul>${values.map((v) => `<li>${esc(v)}</li>`).join("")}</ul>`;
+    const lists = Object.entries(options).map(([aspect, values]) =>
+      `<div>${esc(aspect)}:</div>${list(values)}`
+      + (rejected[aspect]?.length ? `<div>${esc(aspect)} rejected as not matching the picture:</div>${list(rejected[aspect])}` : "")
+    ).join("");
+    out.innerHTML = `<details class="brainstorm"><summary>What was considered</summary>`
+      + `<div>What the picture shows:</div><p>${esc(description)}</p>${lists}</details>`;
+    const tag = (idea) => Object.values(idea).map(esc).join(" · ");
+    const cards = ideas.map(({ idea }) => {
+      const card = document.createElement("div");
+      card.className = "idea";
+      card.innerHTML = `<div class="tag">${tag(idea)}</div><div class="body muted">Waiting…</div>`;
+      out.append(card);
+      return card;
+    });
+    for (const [i, planned] of ideas.entries()) {
+      const body = cards[i].querySelector(".body");
+      go.textContent = `Writing idea ${i + 1} of ${ideas.length}…`;
+      for (let current = planned; current; current = spares.shift()) {
+        if (!out.isConnected) return;  // a new image was described meanwhile
+        cards[i].querySelector(".tag").innerHTML = tag(current.idea);
+        body.className = "body muted";
+        body.textContent = current === planned ? "Writing…" : "That idea didn't work out. Trying another…";
+        try {
+          const { story } = await post("/story/write", { token: current.token });
+          body.className = "body"; body.innerHTML = storyHtml(story);
+          break;
+        } catch (err) {
+          body.className = "body err"; body.textContent = err.message;
+          if (err.status !== 422) break;  // busy or rate-limited: a spare wouldn't help
+        }
+      }
+    }
+  } catch (err) {
+    out.innerHTML = `<span class="err">${esc(err.message)}</span>`;
+  } finally {
+    go.disabled = false; go.textContent = "Brainstorm again";
+  }
+}
+
+function storyHtml({ title, characters, premise, want, obstacle, storyline, first_line }) {
+  const people = characters.map((c) =>
+    `<li><strong>${esc(c.name)}</strong>${c.about ? `, ${esc(c.about)}` : ""}</li>`).join("");
+  return `<h2>${esc(title)}</h2>`
+    + `<h3>Characters</h3><ul>${people}</ul>`
+    + `<h3>Premise</h3><p>${esc(premise)}</p>`
+    + `<h3>Wants</h3><p>${esc(want)}</p>`
+    + `<h3>In the way</h3><p>${esc(obstacle)}</p>`
+    + `<h3>Story</h3><p>${esc(storyline)}</p>`
+    + `<h3>First line</h3><p class="first">${esc(first_line)}</p>`;
+}
+
 function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
 
 form.onsubmit = async (e) => {
   e.preventDefault();
-  const data = new FormData();
-  if ($("file").files[0]) data.append("file", $("file").files[0]);
-
   $("go").disabled = true; $("go").textContent = "Analyzing…";
   result.innerHTML = '<span class="muted">Working… the first request can take a few seconds.</span>';
   try {
-    const res = await fetch("/analyze", { method: "POST", body: data });
-    const json = await res.json();
-    if (!res.ok) { result.innerHTML = `<span class="err">${esc(json.error || "Something went wrong.")}</span>`; return; }
-
-    result.innerHTML = `<div class="muted">This looks like</div><div class="caption">${esc(json.caption)}</div>`;
+    const file = $("file").files[0] && await shrink($("file").files[0]);
+    const data = new FormData();
+    if (file) data.append("file", file);
+    showResult(await post("/analyze", data), file);
   } catch (err) {
-    result.innerHTML = `<span class="err">Request failed: ${esc(err.message)}</span>`;
+    result.innerHTML = `<span class="err">${esc(err.message)}</span>`;
   } finally {
     $("go").disabled = false; $("go").textContent = "Describe image";
   }

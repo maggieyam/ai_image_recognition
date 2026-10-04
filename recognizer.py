@@ -1,5 +1,9 @@
+import hashlib
+import os
 import re
 import sys
+import tempfile
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -15,7 +19,7 @@ from transformers import (
     Florence2ForConditionalGeneration,
 )
 
-from sentences import lower_first, split_sentences, upper_first
+from sentences import LEAD_IN, lower_first, split_sentences, upper_first
 
 MODELS_DIR = Path(__file__).parent / "models"
 # Replaced BLIP-base: about the same size, but its detailed descriptions say
@@ -28,10 +32,13 @@ CLIP_LOCAL_DIR = MODELS_DIR / "clip-vit-base-patch32"
 # that Florence-2 only labels "person"; Florence-2 still finds the faces in
 # close-ups, which YuNet misses.
 YUNET_FILE = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
+# Pinned to a commit and checked, so a moved or half-downloaded file isn't used.
 YUNET_URL = (
-    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/"
-    "face_detection_yunet_2023mar.onnx"
+    "https://github.com/opencv/opencv_zoo/raw/f12e12798e8314f7c074a6656816c048dcc95b7a/"
+    "models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 )
+YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+DOWNLOAD_SECONDS = 60  # a stalled download fails instead of hanging startup
 FACE_SCORE = 0.8  # YuNet's confidence needed to count as a face
 
 # Zero-shot mood labels. Each mood is scored as the average of CLIP text
@@ -70,10 +77,6 @@ DETECT_TOKENS = 512
 QUOTED = re.compile(r'\s*"[^"]*"')
 STILL_FROM = re.compile(r"\bstill from\b", re.I)
 AT_CAMERA = re.compile(r"\b(?:directly )?(?:at|into|toward|towards) the camera\b")
-# "The image shows ...", "The image is ...", "It shows ..."
-LEAD_IN = re.compile(
-    r"^(?:(?:The|This) (?:image|photo|picture) (?:shows|depicts|is(?: of)?)|It shows)\s+"
-)
 
 
 def _torch_can_load_bin():
@@ -120,12 +123,11 @@ class ImageRecognizer:
             _weights_source(CLIP_ID, CLIPModel, CLIP_LOCAL_DIR)
         ).to(self.device)
         self.clip_model.eval()
-        if not YUNET_FILE.exists():
-            YUNET_FILE.parent.mkdir(exist_ok=True)
-            urllib.request.urlretrieve(YUNET_URL, YUNET_FILE)
         self.face_detector = cv2.FaceDetectorYN.create(
-            str(YUNET_FILE), "", (320, 320), score_threshold=FACE_SCORE
+            str(_yunet_file()), "", (320, 320), score_threshold=FACE_SCORE
         )
+        # One detector for every request: its input size is set per picture.
+        self.face_lock = threading.Lock()
         # One unit vector per mood, computed once. A linear probe trained on
         # CLIP image features would replace this matrix (and logit_scale).
         self.mood_names = list(MOODS)
@@ -177,28 +179,33 @@ class ImageRecognizer:
         The main characters in a PIL image, found by their faces, as
         [{"human": "a woman in a white dress", "box": [x1, y1, x2, y2],
           "face": <the face, cropped>}, ...], left to right. YuNet finds the
-        faces; if it finds none (a close-up filling the frame), Florence-2's
+        faces; when it misses a close-up filling the frame, Florence-2's
         object detection looks for them instead.
         """
-        boxes = self._yunet_faces(image) or self._florence_faces(image)
-        people = main_characters([{"box": box} for box in boxes], image.height)
+        faces = self._yunet_faces(image)
+        people = main_characters([{"box": b} for b in faces], image.height)
+        # YuNet misses close-ups filling the frame, sometimes finding just a
+        # small face in the background. Several small faces are a crowd, though,
+        # so Florence-2 (slower) only looks when YuNet found at most one.
+        if not people and len(faces) <= 1:
+            people = main_characters([{"box": b} for b in self._florence_faces(image)], image.height)
         for person in people:
             person.update(human=self._who(image, person["box"]), face=image.crop(person["box"]))
         return people
 
     def _yunet_faces(self, image):
         bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-        self.face_detector.setInputSize(image.size)
-        _, found = self.face_detector.detect(bgr)
-        return _face_boxes(found, image.size)
+        with self.face_lock:
+            self.face_detector.setInputSize(image.size)
+            _, found = self.face_detector.detect(bgr)
+        if found is None:
+            return []
+        return _clean_boxes([[x, y, x + w, y + h] for x, y, w, h in found[:, :4]], image.size)
 
     def _florence_faces(self, image):
         found = self._florence(image, "<OD>", DETECT_TOKENS, parse=True)
-        return [
-            [round(x) for x in box]
-            for label, box in zip(found["labels"], found["bboxes"])
-            if label.lower() == "human face"
-        ]
+        boxes = [b for label, b in zip(found["labels"], found["bboxes"]) if label.lower() == "human face"]
+        return _clean_boxes(boxes, image.size)
 
     def _who(self, image, box):
         """
@@ -250,15 +257,40 @@ class ImageRecognizer:
         return torch.stack(vectors)
 
 
-def _face_boxes(found, size):
-    """YuNet's detections (rows of x, y, w, h, landmarks, score) as [x1, y1, x2, y2] boxes."""
-    if found is None:
-        return []
+def _yunet_file():
+    """
+    YuNet's model file. Downloaded on first use to a temp file of this
+    process's own, checked, then moved in place: an interrupted or bad
+    download is never kept, and processes starting together don't clash.
+    """
+    if YUNET_FILE.exists():
+        return YUNET_FILE
+    YUNET_FILE.parent.mkdir(exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=YUNET_FILE.parent, suffix=".part")
+    try:
+        with os.fdopen(fd, "wb") as out, urllib.request.urlopen(YUNET_URL, timeout=DOWNLOAD_SECONDS) as r:
+            data = r.read()
+            out.write(data)
+        if hashlib.sha256(data).hexdigest() != YUNET_SHA256:
+            raise RuntimeError(f"{YUNET_URL} didn't download correctly; start again to retry")
+        os.replace(temp, YUNET_FILE)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+    return YUNET_FILE
+
+
+def _clean_boxes(boxes, size):
+    """
+    Face boxes [x1, y1, x2, y2] in whole pixels, kept inside the picture;
+    empty ones are dropped, as an empty crop breaks the face model.
+    """
     width, height = size
-    return [
-        [max(0, round(x)), max(0, round(y)), min(width, round(x + w)), min(height, round(y + h))]
-        for x, y, w, h in found[:, :4]
+    clamped = [
+        [max(0, round(x1)), max(0, round(y1)), min(width, round(x2)), min(height, round(y2))]
+        for x1, y1, x2, y2 in boxes
     ]
+    return [b for b in clamped if b[2] > b[0] and b[3] > b[1]]
 
 
 def main_characters(faces, image_height):

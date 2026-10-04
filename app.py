@@ -22,8 +22,9 @@ MAX_SIDE = 1600  # downscale big images; the model resizes anyway
 # Bound on the description the page sends back, to keep prompts small.
 MAX_DESCRIPTION = 2000  # detailed descriptions run to about 700 characters
 WRITER_WAIT = 30  # seconds a story request waits for the writer before "busy"
-# Seconds a sentence of /analyze waits for Qwen (busy writing a story) before
-# it falls back to a plain sentence; describing a picture never fails on it.
+# Seconds /analyze waits for Qwen (busy writing a story) before its sentences
+# fall back to plain ones; it waits once per request, and describing a picture
+# never fails on it.
 ANALYZE_WAIT = 5
 IDEA_SECONDS = 60 * 60  # how long a planned idea can still be written
 GENRE_CHOICES = 3  # genres the page offers for the story
@@ -43,6 +44,10 @@ writer = StoryWriter(qwen)
 # Qwen (llama.cpp) has a single context, so requests that use it take turns.
 # Florence-2 and CLIP are safe to run from several threads at once.
 writer_lock = threading.Lock()
+# Story requests waiting for Qwen. They go first: while one is waiting,
+# /analyze says plain sentences instead of taking Qwen (see llm.Turns).
+stories_waiting = 0
+stories_waiting_lock = threading.Lock()
 # Planned ideas are signed, so /story/write only writes what /story/plan
 # planned, not any text a client sends. With more than one server process,
 # set SECRET_KEY so an idea planned by one can be written by another.
@@ -56,7 +61,15 @@ class WriterBusy(Exception):
 @contextmanager
 def writer_turn():
     """Hold the story writer, or raise WriterBusy after WRITER_WAIT seconds."""
-    if not writer_lock.acquire(timeout=WRITER_WAIT):
+    global stories_waiting
+    with stories_waiting_lock:
+        stories_waiting += 1
+    try:
+        got_it = writer_lock.acquire(timeout=WRITER_WAIT)
+    finally:
+        with stories_waiting_lock:
+            stories_waiting -= 1
+    if not got_it:
         raise WriterBusy
     try:
         yield
@@ -128,7 +141,7 @@ def analyze():
         caption, description = recognizer.describe(image)
         yield {"caption": caption, "description": description}
         moods = recognizer.moods(image)
-        turns = Turns(qwen, writer_lock, ANALYZE_WAIT)
+        turns = Turns(qwen, writer_lock, ANALYZE_WAIT, defer=lambda: stories_waiting > 0)
         for piece in what_i_saw(turns, description, caption):
             yield {"saw": piece}
         # How the people in the picture feel; nothing when there's no person.

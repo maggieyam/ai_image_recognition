@@ -2,8 +2,8 @@
 Recognizing how the people in a photo feel. This module does the
 orchestration; Qwen (llm.py) only puts the face model's results into words.
 
-1. Code: does Florence-2's description mention a person? If not (animals,
-   objects, places), nothing is said about feelings.
+1. Qwen: does Florence-2's description mention a living person? If not
+   (animals, objects, places), nothing is said about feelings.
 2. Florence-2 (recognizer.py): find the main characters by their faces, and
    say who each one is.
 3. Code: for each person, the emotion model (emotions.py) reads their face.
@@ -18,22 +18,23 @@ right; from the face model's results, 23 of 40 (as many as the face model).
 Qwen runs at temperature 0, so the same input gets the same answer.
 """
 import json
-import re
+import logging
 
 from llm import say
-from sentences import upper_first
+from sentences import LEAD_IN, lower_first, upper_first
 
-# Words for people in Florence-2's descriptions; a plural ("soldiers") counts
-# as its singular. If none appears, there's no human in the picture. Family
-# words ("mother", "couple") and "crowd" are left out: descriptions use them
-# for animals too ("a mother bear and her cubs").
-HUMAN_WORDS = {
-    "person", "people", "man", "men", "woman", "women", "boy", "girl", "child", "children",
-    "kid", "baby", "babies", "toddler", "teenager", "adult", "lady", "ladies", "gentleman",
-    "gentlemen", "guy", "bride", "groom", "student", "soldier", "player", "athlete",
-    "worker", "businessman", "businessmen", "businesswoman", "businesswomen", "doctor",
-    "nurse", "officer", "policeman", "policemen", "firefighter", "chef", "dancer", "singer",
-    "musician", "tourist", "farmer", "teacher", "jockey", "surfer", "skier", "climber",
+# Asked of Qwen with the description, answered yes or no: "You saw a close-up
+# of a baby's face. ..." The description's "The image is" is left out, and it
+# ends with a full stop, so none is added. An earlier
+# wording ('In this description "...", did it mention a living person?') did as
+# well as a list of person words on 169 OASIS photos, without a list to keep
+# up ("son", "surgeons"); asked about a "photo", or with a free-text answer,
+# Qwen did much worse.
+PERSON_QUESTION = "You saw {} Did you see any person?"
+PERSON_SCHEMA = {
+    "type": "object",
+    "properties": {"mentioned": {"type": "boolean"}},
+    "required": ["mentioned"],
 }
 EXPRESS_SYSTEM = (
     "You get a JSON list of the people in a photo, with who each one is and how they feel. "
@@ -51,26 +52,45 @@ def feelings_events(qwen, recognizer, emotions, image, description):
     """
     How the people in a photo feel, as /analyze events: a status while their
     faces are read, the people found, then Qwen's words piece by piece. Just
-    {"people": []} when the description mentions no person. `recognizer`
-    finds the people (Florence-2), `emotions` reads each face, one at a time.
+    {"people": []} when the description mentions no person. `qwen` is an
+    llm.Turns, `recognizer` finds the people (Florence-2), `emotions` reads
+    each face, one at a time.
     """
-    if not mentions_a_person(description):
+    if not mentions_a_person(qwen, description):
         yield {"people": []}
         return
     yield {"status": "Looking at their faces…", "for": "feelings"}
-    people = recognizer.find_people(image)
-    for person in people:
-        person.update(emotions.recognize(person.pop("face")))
+    # Feelings are optional: if a face can't be read, that person is left out,
+    # and the rest of what the app says still follows.
+    try:
+        found = recognizer.find_people(image)
+    except Exception:
+        logging.exception("finding the people failed")
+        found = []
+    people = []
+    for person in found:
+        try:
+            person.update(emotions.recognize(person.pop("face")))
+        except Exception:
+            logging.exception("reading a face failed")
+            continue
+        people.append(person)
     yield {"people": people}
     if people:
         for piece in express(qwen, people):
             yield {"feelings": piece}
 
 
-def mentions_a_person(description):
-    """Whether Florence-2's description of a photo mentions a person."""
-    words = re.findall(r"[a-z]+", description.lower())
-    return any(w in HUMAN_WORDS or (w.endswith("s") and w[:-1] in HUMAN_WORDS) for w in words)
+def mentions_a_person(qwen, description):
+    """
+    Whether Florence-2's description of a photo mentions a living person, as
+    Qwen reads it. If Qwen can't answer (busy, or cut off), the faces are
+    looked for anyway: finding none just means nothing is said.
+    """
+    seen = lower_first(LEAD_IN.sub("", description))
+    messages = [{"role": "user", "content": PERSON_QUESTION.format(seen)}]
+    reply = qwen.ask(messages, PERSON_SCHEMA, temperature=0, max_tokens=10)
+    return reply is None or reply["mentioned"]
 
 
 def express(qwen, people):

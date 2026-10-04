@@ -195,7 +195,12 @@ class StoryWriter:
             if isinstance(source, list):
                 options[aspect] = random.sample(source, OPTIONS_PER_ASPECT)
                 continue
-            grounded = self._grounded_ideas(description, mood, source, match)
+            # With one chosen genre, each idea makes only one combination, so
+            # keep more of them: up to enough for the ideas and their spares,
+            # but insist only on enough for the ideas, so spares still have to
+            # be within GROUNDING_MARGIN of the best.
+            keep = (BRAINSTORM_IDEAS, count) if genre else (OPTIONS_PER_ASPECT, GROUNDING_KEEP)
+            grounded = self._grounded_ideas(description, mood, source, match, *keep)
             if grounded is None:
                 return None
             options[aspect], rejected[aspect] = grounded
@@ -203,24 +208,27 @@ class StoryWriter:
         ideas, spares = self._pick(description, mood, combos, count)
         return {"options": options, "rejected": rejected, "ideas": ideas, "spares": spares}
 
-    def _grounded_ideas(self, description, mood, ask, match):
+    def _grounded_ideas(
+        self, description, mood, ask, match, most=OPTIONS_PER_ASPECT, least=GROUNDING_KEEP
+    ):
         """
         (kept, rejected) brainstormed ideas, best grounded first, or None.
+        Up to `most` are kept, and at least `least` if they pass GROUNDING_MIN.
         Rejected ideas are the ones that failed the CLIP check; grounded ideas
-        beyond OPTIONS_PER_ASPECT are left out of both.
+        beyond `most` are left out of both.
         """
         for _ in range(MAX_TRIES):
             ideas = self._brainstorm(description, mood, ask)
             if not ideas:
                 continue
             if match is None:
-                return ideas[:OPTIONS_PER_ASPECT], []
+                return ideas[:most], []
             scores = dict(zip(ideas, match(ideas)))
             ranked = sorted(ideas, key=scores.get, reverse=True)
             cutoff = max(GROUNDING_MIN, scores[ranked[0]] - GROUNDING_MARGIN)
-            kept = [i for i in ranked if scores[i] >= cutoff][:OPTIONS_PER_ASPECT]
-            if len(kept) < GROUNDING_KEEP:
-                kept = [i for i in ranked if scores[i] >= GROUNDING_MIN][:GROUNDING_KEEP]
+            kept = [i for i in ranked if scores[i] >= cutoff][:most]
+            if len(kept) < least:
+                kept = [i for i in ranked if scores[i] >= GROUNDING_MIN][:least]
             if kept:
                 return kept, [i for i in ranked if i not in kept and scores[i] < cutoff]
         return None

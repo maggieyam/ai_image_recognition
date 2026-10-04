@@ -2,7 +2,7 @@ import pytest
 
 import writer
 from sentences import split_sentences
-from writer import GROUNDING_MIN, MAX_TRIES, StoryWriter
+from writer import BRAINSTORM_IDEAS, GROUNDING_MIN, MAX_TRIES, StoryWriter
 
 DESCRIPTION = "A man in a white robe walks alone across sand dunes under a clear blue sky."
 SEED = {
@@ -115,3 +115,28 @@ def test_plan_uses_the_chosen_genre(story_writer, monkeypatch):
     plan = story_writer.plan(DESCRIPTION, "happy", count=2, genre="comedy")
     assert plan["options"]["genre"] == ["comedy"]
     assert {c["genre"] for c in seen} == {"comedy"}
+
+
+def test_a_chosen_genre_keeps_more_characters_from_one_brainstorm(story_writer, monkeypatch):
+    calls = []
+
+    def grounded(description, mood, ask, match, most, least):
+        calls.append((most, least))
+        return ["a nurse", "a pilot", "a chef", "a diver", "a baker", "a poet"][:most], []
+
+    monkeypatch.setattr(story_writer, "_grounded_ideas", grounded)
+    monkeypatch.setattr(story_writer, "_pick", lambda d, m, combos, count: (combos[:count], combos[count:]))
+    plan = story_writer.plan(DESCRIPTION, "happy", count=3, genre="comedy")
+    assert calls == [(BRAINSTORM_IDEAS, 3)]  # one brainstorm: room for 3 ideas + 3 spares, 3 required
+    assert len(plan["ideas"]) == 3 and len(plan["spares"]) == 3
+
+
+def test_grounded_ideas_keeps_the_margin_when_more_are_allowed(story_writer, monkeypatch):
+    scores = {"a": 0.33, "b": 0.31, "c": 0.22, "d": 0.20, "e": 0.19, "f": 0.185}
+    monkeypatch.setattr(story_writer, "_brainstorm", lambda *a: list(scores))
+    kept, rejected = story_writer._grounded_ideas(
+        DESCRIPTION, "happy", "ideas", lambda texts: [scores[t] for t in texts],
+        most=BRAINSTORM_IDEAS, least=3,
+    )
+    assert kept == ["a", "b", "c"]  # 2 within the margin, topped up to the 3 required, not all 6
+    assert rejected == ["d", "e", "f"]

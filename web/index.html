@@ -39,6 +39,8 @@
   @keyframes pulse { 50% { opacity:.35; } }
   button.go.alt { background:transparent; color:var(--accent); border:1px solid var(--accent); }
   .row { display:flex; gap:8px; align-items:stretch; }
+  /* Without this, display rules like .row's would show [hidden] elements. */
+  [hidden] { display:none !important; }
   .row .go { flex:1; }
   .row select { padding:0 8px; border:1px solid var(--line); border-radius:8px; background:var(--card);
                 color:var(--text); font:inherit; }

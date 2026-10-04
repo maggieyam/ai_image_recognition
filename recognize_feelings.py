@@ -9,11 +9,10 @@ orchestration; Qwen (llm.py) only puts the face model's results into words.
    it writes. Qwen sees no photo, only those facts, so it can relate them
    ("the man is angry, and the girl is crying, so she must be sad").
 
-Why code orchestrates: told to call the emotion tool only for living humans,
-Qwen 1.5B called it for every photo; and left to call it itself, it never
-did. Answering from the description alone, it got 7 of 40 OASIS face photos
-right; from the face model's results, 23 of 40 (as many as the face model).
-Qwen runs at temperature 0, so the same input gets the same answer.
+Why a face model reads the emotion: guessing feelings from Florence-2's
+description alone, Qwen 1.5B got 7 of 40 OASIS face photos right; worded from
+the face model's results, 23 of 40 (as many as the face model). Qwen runs at
+temperature 0, so the same input gets the same answer.
 
 Every photo is searched for faces; nothing first checks whether there's a
 person (Qwen 1.5B couldn't reliably tell from the description; experiments on

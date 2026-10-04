@@ -1,10 +1,5 @@
 import re
 
-# "The image shows ...", "The image is ...", "It shows ..."
-LEAD_IN = re.compile(
-    r"^(?:(?:The|This) (?:image|photo|picture) (?:shows|depicts|is(?: of)?)|It shows)\s+"
-)
-
 
 def split_sentences(text):
     # Don't split after titles like "Mr." ("... met Mrs. Brown").

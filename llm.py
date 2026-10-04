@@ -1,7 +1,7 @@
 """
-Qwen, the small language model the app shares: the story writer and recognize_feelings
-both ask it questions, so it's loaded once. llama.cpp has a single context, so
-callers take turns (app.py's lock).
+Qwen, the small language model the app shares: the story writer, narrate and
+recognize_feelings all ask it questions, so it's loaded once. llama.cpp has a
+single context, so callers take turns (app.py's lock).
 """
 import json
 import platform

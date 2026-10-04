@@ -19,7 +19,7 @@ from transformers import (
     Florence2ForConditionalGeneration,
 )
 
-from sentences import LEAD_IN, lower_first, split_sentences, upper_first
+from sentences import lower_first, split_sentences, upper_first
 
 MODELS_DIR = Path(__file__).parent / "models"
 # Replaced BLIP-base: about the same size, but its detailed descriptions say
@@ -77,6 +77,10 @@ DETECT_TOKENS = 512
 QUOTED = re.compile(r'\s*"[^"]*"')
 STILL_FROM = re.compile(r"\bstill from\b", re.I)
 AT_CAMERA = re.compile(r"\b(?:directly )?(?:at|into|toward|towards) the camera\b")
+# "The image shows ...", "The image is ...", "It shows ..."
+LEAD_IN = re.compile(
+    r"^(?:(?:The|This) (?:image|photo|picture) (?:shows|depicts|is(?: of)?)|It shows)\s+"
+)
 
 
 def _torch_can_load_bin():

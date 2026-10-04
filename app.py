@@ -39,7 +39,7 @@ limiter = Limiter(get_remote_address, app=app, storage_uri="memory://")
 
 recognizer = ImageRecognizer()
 emotions = EmotionRecognizer()
-qwen = Qwen()  # shared by the story writer and recognize_feelings
+qwen = Qwen()  # shared by the story writer, narrate and recognize_feelings
 writer = StoryWriter(qwen)
 # Qwen (llama.cpp) has a single context, so requests that use it take turns.
 # Florence-2 and CLIP are safe to run from several threads at once.

@@ -1,26 +1,15 @@
 import difflib
 import itertools
 import json
-import platform
 import random
 import re
-import time
-
-from llama_cpp import Llama
 
 from sentences import split_sentences
 
-# 4-bit GGUF, the format planned for the Jetson. 0.5B was tried first and
-# could not follow the seed format (too many characters, no conflict).
-WRITER_REPO = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
-WRITER_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
 # Each step tries twice. A prompt that fails twice tends to keep failing the
 # same way, so after that the step gives up and the page moves on to a
 # different idea rather than asking again.
 MAX_TRIES = 2
-# Wall-clock limit per model call. Calls normally take 3-30s; the limit keeps
-# one runaway generation from holding the model (and every other request).
-CALL_SECONDS = 60
 MAX_IDEAS = 3
 OPTIONS_PER_ASPECT = 4
 BRAINSTORM_IDEAS = 6  # brainstormed per aspect; the best grounded ones are kept
@@ -183,19 +172,11 @@ class StoryWriter:
     Only the results (plain dicts) pass between steps.
     """
 
-    def __init__(self):
-        # Offload every layer when llama.cpp has a GPU backend (e.g. CUDA on the
-        # Jetson). Not on Intel Macs: Metal on their AMD GPUs returns garbage.
-        intel_mac = platform.system() == "Darwin" and platform.machine() == "x86_64"
-        self.llm = Llama.from_pretrained(
-            WRITER_REPO,
-            WRITER_FILE,
-            n_ctx=2048,
-            n_gpu_layers=0 if intel_mac else -1,
-            verbose=False,
-        )
+    def __init__(self, qwen):
+        """qwen: the shared llm.Qwen."""
+        self.qwen = qwen
 
-    def plan(self, description, mood, count=MAX_IDEAS, match=None):
+    def plan(self, description, mood, count=MAX_IDEAS, match=None, genre=None):
         """
         Brainstorm options for each aspect and pick the `count` best
         combinations. `match(texts)` scores texts against the photo (CLIP);
@@ -204,13 +185,22 @@ class StoryWriter:
          "ideas": [{"genre": ..., "characters": ...}, ...], "spares": [...]}
         or None if no grounded ideas came up. "spares" are up to `count` more
         combinations, to write in place of an idea that can't be written.
+        With `genre`, every idea is in that genre instead of a random few.
         """
         options, rejected = {}, {}
         for aspect, source in ASPECTS.items():
+            if aspect == "genre" and genre:
+                options[aspect] = [genre]
+                continue
             if isinstance(source, list):
                 options[aspect] = random.sample(source, OPTIONS_PER_ASPECT)
                 continue
-            grounded = self._grounded_ideas(description, mood, source, match)
+            # With one chosen genre, each idea makes only one combination, so
+            # keep more of them: up to enough for the ideas and their spares,
+            # but insist only on enough for the ideas, so spares still have to
+            # be within GROUNDING_MARGIN of the best.
+            keep = (BRAINSTORM_IDEAS, count) if genre else (OPTIONS_PER_ASPECT, GROUNDING_KEEP)
+            grounded = self._grounded_ideas(description, mood, source, match, *keep)
             if grounded is None:
                 return None
             options[aspect], rejected[aspect] = grounded
@@ -218,24 +208,27 @@ class StoryWriter:
         ideas, spares = self._pick(description, mood, combos, count)
         return {"options": options, "rejected": rejected, "ideas": ideas, "spares": spares}
 
-    def _grounded_ideas(self, description, mood, ask, match):
+    def _grounded_ideas(
+        self, description, mood, ask, match, most=OPTIONS_PER_ASPECT, least=GROUNDING_KEEP
+    ):
         """
         (kept, rejected) brainstormed ideas, best grounded first, or None.
+        Up to `most` are kept, and at least `least` if they pass GROUNDING_MIN.
         Rejected ideas are the ones that failed the CLIP check; grounded ideas
-        beyond OPTIONS_PER_ASPECT are left out of both.
+        beyond `most` are left out of both.
         """
         for _ in range(MAX_TRIES):
             ideas = self._brainstorm(description, mood, ask)
             if not ideas:
                 continue
             if match is None:
-                return ideas[:OPTIONS_PER_ASPECT], []
+                return ideas[:most], []
             scores = dict(zip(ideas, match(ideas)))
             ranked = sorted(ideas, key=scores.get, reverse=True)
             cutoff = max(GROUNDING_MIN, scores[ranked[0]] - GROUNDING_MARGIN)
-            kept = [i for i in ranked if scores[i] >= cutoff][:OPTIONS_PER_ASPECT]
-            if len(kept) < GROUNDING_KEEP:
-                kept = [i for i in ranked if scores[i] >= GROUNDING_MIN][:GROUNDING_KEEP]
+            kept = [i for i in ranked if scores[i] >= cutoff][:most]
+            if len(kept) < least:
+                kept = [i for i in ranked if scores[i] >= GROUNDING_MIN][:least]
             if kept:
                 return kept, [i for i in ranked if i not in kept and scores[i] < cutoff]
         return None
@@ -300,29 +293,7 @@ class StoryWriter:
         return picks, spares
 
     def _ask(self, messages, schema, temperature, max_tokens):
-        # The schema becomes a grammar, so the reply is always well-formed
-        # JSON unless max_tokens or the time limit cuts it off. Streamed so the
-        # time limit can stop it.
-        deadline = time.monotonic() + CALL_SECONDS
-        chunks = self.llm.create_chat_completion(
-            messages,
-            response_format={"type": "json_object", "schema": schema},
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=0.9,
-            repeat_penalty=1.1,
-            stream=True,
-        )
-        text = ""
-        for chunk in chunks:
-            text += chunk["choices"][0]["delta"].get("content") or ""
-            if time.monotonic() > deadline:
-                chunks.close()
-                return None
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return None
+        return self.qwen.ask(messages, schema, temperature, max_tokens)
 
 
 def _scene(description, mood):

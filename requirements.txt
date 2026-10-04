@@ -11,3 +11,4 @@ flask
 flask-limiter
 gunicorn
 emotiefflib  # facial-emotion model (ONNX); weights download to ~/.emotiefflib
+opencv-python  # YuNet face detector; its model downloads to models/

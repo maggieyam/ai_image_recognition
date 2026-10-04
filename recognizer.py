@@ -1,7 +1,10 @@
 import re
 import sys
+import urllib.request
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 from huggingface_hub import hf_hub_download
 from PIL import Image
@@ -20,6 +23,16 @@ MODELS_DIR = Path(__file__).parent / "models"
 FLORENCE_ID = "florence-community/Florence-2-base"
 CLIP_ID = "openai/clip-vit-base-patch32"
 CLIP_LOCAL_DIR = MODELS_DIR / "clip-vit-base-patch32"
+# OpenCV's YuNet face detector (MIT licence, 230 KB), downloaded to models/ on
+# first use. It finds the faces in everyday photos (people from the waist up)
+# that Florence-2 only labels "person"; Florence-2 still finds the faces in
+# close-ups, which YuNet misses.
+YUNET_FILE = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
+YUNET_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/"
+    "face_detection_yunet_2023mar.onnx"
+)
+FACE_SCORE = 0.8  # YuNet's confidence needed to count as a face
 
 # Zero-shot mood labels. Each mood is scored as the average of CLIP text
 # embeddings over (synonym x template), which is steadier than one prompt.
@@ -107,6 +120,12 @@ class ImageRecognizer:
             _weights_source(CLIP_ID, CLIPModel, CLIP_LOCAL_DIR)
         ).to(self.device)
         self.clip_model.eval()
+        if not YUNET_FILE.exists():
+            YUNET_FILE.parent.mkdir(exist_ok=True)
+            urllib.request.urlretrieve(YUNET_URL, YUNET_FILE)
+        self.face_detector = cv2.FaceDetectorYN.create(
+            str(YUNET_FILE), "", (320, 320), score_threshold=FACE_SCORE
+        )
         # One unit vector per mood, computed once. A linear probe trained on
         # CLIP image features would replace this matrix (and logit_scale).
         self.mood_names = list(MOODS)
@@ -157,28 +176,41 @@ class ImageRecognizer:
         """
         The main characters in a PIL image, found by their faces, as
         [{"human": "a woman in a white dress", "box": [x1, y1, x2, y2],
-          "face": <the face, cropped>}, ...], left to right.
+          "face": <the face, cropped>}, ...], left to right. YuNet finds the
+        faces; if it finds none (a close-up filling the frame), Florence-2's
+        object detection looks for them instead.
         """
-        found = self._florence(image, "<OD>", DETECT_TOKENS, parse=True)
-        boxes = [
-            [round(x) for x in box]
-            for label, box in zip(found["labels"], found["bboxes"])
-            if label.lower() == "human face"
-        ]
+        boxes = self._yunet_faces(image) or self._florence_faces(image)
         people = main_characters([{"box": box} for box in boxes], image.height)
         for person in people:
             person.update(human=self._who(image, person["box"]), face=image.crop(person["box"]))
         return people
 
+    def _yunet_faces(self, image):
+        bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+        self.face_detector.setInputSize(image.size)
+        _, found = self.face_detector.detect(bgr)
+        return _face_boxes(found, image.size)
+
+    def _florence_faces(self, image):
+        found = self._florence(image, "<OD>", DETECT_TOKENS, parse=True)
+        return [
+            [round(x) for x in box]
+            for label, box in zip(found["labels"], found["bboxes"])
+            if label.lower() == "human face"
+        ]
+
     def _who(self, image, box):
         """
-        Who a face belongs to ("a woman in a white dress"): Florence-2's caption
-        of the area around the face, which takes in their hair and clothes.
+        Who a face belongs to ("a woman in a black jacket"): Florence-2's caption
+        of the face and what's just below it (hair, shoulders, clothes). The
+        crop is kept narrow: a wider one took in the person next to them, and
+        both got "a man and a woman standing next to each other".
         """
         x1, y1, x2, y2 = box
         w, h = x2 - x1, y2 - y1
         around = image.crop(
-            (max(0, x1 - w), max(0, y1 - h // 2), min(image.width, x2 + w), min(image.height, y2 + 3 * h))
+            (max(0, x1 - w // 4), max(0, y1 - h // 2), min(image.width, x2 + w // 4), min(image.height, y2 + 2 * h))
         )
         return lower_first(self._florence(around, "<CAPTION>", max_new_tokens=20).rstrip("."))
 
@@ -216,6 +248,17 @@ class ImageRecognizer:
             mean = text.mean(dim=0)
             vectors.append(mean / mean.norm())
         return torch.stack(vectors)
+
+
+def _face_boxes(found, size):
+    """YuNet's detections (rows of x, y, w, h, landmarks, score) as [x1, y1, x2, y2] boxes."""
+    if found is None:
+        return []
+    width, height = size
+    return [
+        [max(0, round(x)), max(0, round(y)), min(width, round(x + w)), min(height, round(y + h))]
+        for x, y, w, h in found[:, :4]
+    ]
 
 
 def main_characters(faces, image_height):

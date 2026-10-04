@@ -1,4 +1,6 @@
-from recognizer import MAX_PEOPLE, _caption_and_description, main_characters
+import numpy as np
+
+from recognizer import MAX_PEOPLE, _caption_and_description, _face_boxes, main_characters
 
 
 def test_drops_film_still_and_title_sentences():
@@ -33,3 +35,9 @@ def test_main_characters_keep_the_biggest_faces_left_to_right():
     kept = main_characters(faces, image_height=1000)
     assert len(kept) == MAX_PEOPLE
     assert [f["box"][0] for f in kept] == [100, 300, 500, 700]  # the 4 biggest, left to right
+
+
+def test_face_boxes_from_yunet_rows_stay_inside_the_picture():
+    found = np.array([[10.4, 20.6, 50.0, 60.0] + [0] * 11, [-5.0, 90.0, 30.0, 40.0] + [0] * 11])
+    assert _face_boxes(found, (100, 120)) == [[10, 21, 60, 81], [0, 90, 25, 120]]
+    assert _face_boxes(None, (100, 120)) == []

@@ -44,7 +44,7 @@ To serve it to other people, run it with gunicorn instead of `python app.py`:
 SECRET_KEY=change-me gunicorn -w 1 --threads 4 -b 0.0.0.0:8000 app:app
 ```
 
-Keep it to one worker: each worker loads its own 2.2 GB of models, and rate limits are counted per worker. Threads let pictures be described while a story is being written. `SECRET_KEY` signs the story ideas the server hands out; without it, a random key is made at startup and ideas planned before a restart can't be written.
+Keep it to one worker: each worker loads its own 2.2 GB of models, and rate limits are counted per worker. Threads let pictures be described while a story is being written; if the story writer has Qwen for more than a few seconds, the app says plain sentences about the picture instead of waiting. `SECRET_KEY` signs the story ideas the server hands out; without it, a random key is made at startup and ideas planned before a restart can't be written.
 
 To run the tests (no models needed): `pip install pytest && pytest`.
 

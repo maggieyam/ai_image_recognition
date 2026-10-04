@@ -12,8 +12,7 @@ from transformers import (
     Florence2ForConditionalGeneration,
 )
 
-from recognize_feelings import main_characters
-from sentences import split_sentences
+from sentences import lower_first, split_sentences, upper_first
 
 MODELS_DIR = Path(__file__).parent / "models"
 # Replaced BLIP-base: about the same size, but its detailed descriptions say
@@ -44,6 +43,16 @@ MOOD_TEMPLATES = [
     "a photo that feels {}.",
     "a {} moment.",
 ]
+
+# Faces shorter than this share of the photo's height are background people
+# (a crowd behind the main character). Provisional: to be set from real photos.
+MIN_FACE_HEIGHT = 0.1
+# At most this many main characters (the biggest faces): each one costs a
+# Florence-2 caption and a face-model pass before any feelings are said.
+MAX_PEOPLE = 4
+# Object detection lists every object, about 7 tokens each, so 512 tokens
+# cover about 70 objects; "human face" entries past the limit would be lost.
+DETECT_TOKENS = 512
 
 QUOTED = re.compile(r'\s*"[^"]*"')
 STILL_FROM = re.compile(r"\bstill from\b", re.I)
@@ -147,20 +156,10 @@ class ImageRecognizer:
     def find_people(self, image):
         """
         The main characters in a PIL image, found by their faces, as
-        [{"human": "a woman in a white dress", "position": "left",
-          "box": [x1, y1, x2, y2], "face": <the face, cropped>}, ...].
-        Faces too small to be a main character (a crowd behind) are dropped.
+        [{"human": "a woman in a white dress", "box": [x1, y1, x2, y2],
+          "face": <the face, cropped>}, ...], left to right.
         """
-        inputs = self.florence_processor(text="<OD>", images=image, return_tensors="pt").to(
-            self.device
-        )
-        with torch.no_grad():
-            out = self.florence_model.generate(**inputs, max_new_tokens=256)
-        found = self.florence_processor.post_process_generation(
-            self.florence_processor.batch_decode(out, skip_special_tokens=False)[0],
-            task="<OD>",
-            image_size=image.size,
-        )["<OD>"]
+        found = self._florence(image, "<OD>", DETECT_TOKENS, parse=True)
         boxes = [
             [round(x) for x in box]
             for label, box in zip(found["labels"], found["bboxes"])
@@ -168,11 +167,7 @@ class ImageRecognizer:
         ]
         people = main_characters([{"box": box} for box in boxes], image.height)
         for person in people:
-            person.update(
-                human=self._who(image, person["box"]),
-                position=_position(person["box"], image.width),
-                face=image.crop(person["box"]),
-            )
+            person.update(human=self._who(image, person["box"]), face=image.crop(person["box"]))
         return people
 
     def _who(self, image, box):
@@ -185,16 +180,21 @@ class ImageRecognizer:
         around = image.crop(
             (max(0, x1 - w), max(0, y1 - h // 2), min(image.width, x2 + w), min(image.height, y2 + 3 * h))
         )
-        caption = self._florence(around, "<CAPTION>", max_new_tokens=20).rstrip(".")
-        return caption[:1].lower() + caption[1:]
+        return lower_first(self._florence(around, "<CAPTION>", max_new_tokens=20).rstrip("."))
 
-    def _florence(self, image, task, max_new_tokens):
+    def _florence(self, image, task, max_new_tokens, parse=False):
+        """Florence-2's output for a task: text, or with `parse`, its parsed result (boxes)."""
         inputs = self.florence_processor(text=task, images=image, return_tensors="pt").to(
             self.device
         )
         with torch.no_grad():
             out = self.florence_model.generate(**inputs, max_new_tokens=max_new_tokens)
-        return self.florence_processor.decode(out[0], skip_special_tokens=True).strip()
+        if not parse:
+            return self.florence_processor.decode(out[0], skip_special_tokens=True).strip()
+        raw = self.florence_processor.batch_decode(out, skip_special_tokens=False)[0]
+        return self.florence_processor.post_process_generation(
+            raw, task=task, image_size=image.size
+        )[task]
 
     def image_vector(self, image):
         """The unit CLIP embedding of a PIL image."""
@@ -218,10 +218,18 @@ class ImageRecognizer:
         return torch.stack(vectors)
 
 
-def _position(box, width):
-    """Where a box sits across the picture: "left", "center" or "right" third."""
-    middle = (box[0] + box[2]) / 2
-    return "left" if middle < width / 3 else "right" if middle > 2 * width / 3 else "center"
+def main_characters(faces, image_height):
+    """
+    The faces big enough to be main characters, at most MAX_PEOPLE (the
+    biggest), left to right. Each face has a "box" [x1, y1, x2, y2].
+    """
+    big = [f for f in faces if _height(f) >= MIN_FACE_HEIGHT * image_height]
+    biggest = sorted(big, key=_height, reverse=True)[:MAX_PEOPLE]
+    return sorted(biggest, key=lambda f: f["box"][0])
+
+
+def _height(face):
+    return face["box"][3] - face["box"][1]
 
 
 def _caption_and_description(text):
@@ -240,7 +248,7 @@ def _caption_and_description(text):
         kept = [QUOTED.sub("", s) for s in sentences]
     description = AT_CAMERA.sub("straight ahead", " ".join(kept))
     caption = LEAD_IN.sub("", split_sentences(description)[0])
-    return caption[:1].upper() + caption[1:], description
+    return upper_first(caption), description
 
 
 if __name__ == "__main__":

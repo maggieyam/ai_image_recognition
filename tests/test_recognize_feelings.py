@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from recognize_feelings import express, how_people_feel, main_characters, mentions_a_person
+from recognize_feelings import express, feelings_events, mentions_a_person
 
 
 class FakeQwen:
@@ -38,8 +38,8 @@ class FakeEmotions:
         return {"emotion": face, "valence": 0.0, "arousal": 0.0}
 
 
-MAN = {"human": "a man with a beard", "position": "left", "face": "Anger"}
-GIRL = {"human": "a girl crying", "position": "right", "face": "Sadness"}
+MAN = {"human": "a man with a beard", "face": "Anger"}
+GIRL = {"human": "a girl crying", "face": "Sadness"}
 
 
 @pytest.mark.parametrize(
@@ -47,6 +47,10 @@ GIRL = {"human": "a girl crying", "position": "right", "face": "Sadness"}
     [
         ("A woman kneels next to a dog lying on the road.", True),
         ("Two men and a little girl sit on a bench.", True),
+        ("A soldier smiles at the camera.", True),
+        ("Two players celebrate on the field.", True),
+        ("A bride and groom walk down the aisle.", True),
+        ("A group of students sit in a classroom.", True),
         ("A mother bear and her two cubs on a rocky hillside.", False),
         ("A close-up of a pile of fresh strawberries.", False),
         ("Three glasses of whiskey on a black background.", False),
@@ -56,31 +60,40 @@ def test_mentions_a_person(description, person):
     assert mentions_a_person(description) is person
 
 
+def run(qwen, people, description, emotions=None):
+    """The events /analyze would send for these people, and the fake models."""
+    recognizer, emotions = FakeRecognizer(people), emotions or FakeEmotions()
+    events = list(feelings_events(qwen, recognizer, emotions, "image", description))
+    return events, recognizer, emotions
+
+
 def test_each_persons_face_is_read_then_qwen_says_it_once():
-    qwen, emotions = FakeQwen("The man is angry, and the girl is sad."), FakeEmotions()
-    result = how_people_feel(qwen, FakeRecognizer([MAN, GIRL]), emotions, "image", "A man and a girl.")
+    qwen = FakeQwen("The man is angry, and the girl is sad.")
+    events, _, emotions = run(qwen, [MAN, GIRL], "A man and a girl.")
     assert emotions.faces == ["Anger", "Sadness"]  # one face at a time
     assert len(qwen.calls) == 1 and qwen.calls[0]["temperature"] == 0
     assert json.loads(qwen.calls[0]["prompt"]) == [
         {"human": "a man with a beard", "feeling": "angry"},
         {"human": "a girl crying", "feeling": "sad"},
     ]
-    assert result["answer"] == "The man is angry, and the girl is sad."
-    assert [p["emotion"] for p in result["people"]] == ["Anger", "Sadness"]
-    assert all("face" not in p for p in result["people"])
+    assert events[0] == {"status": "Looking at their faces…", "for": "feelings"}
+    people = events[1]["people"]
+    assert [p["emotion"] for p in people] == ["Anger", "Sadness"]
+    assert all("face" not in p for p in people)
+    assert "".join(e["feelings"] for e in events[2:]) == "The man is angry, and the girl is sad."
 
 
 def test_no_person_in_the_description_means_nothing_runs():
-    qwen, recognizer, emotions = FakeQwen(), FakeRecognizer([MAN]), FakeEmotions()
-    result = how_people_feel(qwen, recognizer, emotions, "image", "A brown dog sleeps on a couch.")
-    assert result == {"people": [], "answer": None}
+    qwen = FakeQwen()
+    events, recognizer, emotions = run(qwen, [MAN], "A brown dog sleeps on a couch.")
+    assert events == [{"people": []}]
     assert recognizer.calls == 0 and emotions.faces == [] and qwen.calls == []
 
 
 def test_nothing_is_said_without_a_main_characters_face():
-    qwen, emotions = FakeQwen(), FakeEmotions()
-    result = how_people_feel(qwen, FakeRecognizer([]), emotions, "image", "A man seen from behind.")
-    assert result == {"people": [], "answer": None}
+    qwen = FakeQwen()
+    events, _, emotions = run(qwen, [], "A man seen from behind.")
+    assert events == [{"status": "Looking at their faces…", "for": "feelings"}, {"people": []}]
     assert emotions.faces == [] and qwen.calls == []
 
 
@@ -94,9 +107,3 @@ def test_express_sends_who_and_feeling_as_json_and_streams_the_answer():
 def test_express_falls_back_to_plain_sentences_when_qwen_says_nothing():
     pieces = express(FakeQwen(""), [{"human": "a man with a beard", "emotion": "Anger"}])
     assert "".join(pieces) == "A man with a beard looks angry."
-
-
-def test_main_characters_drop_background_faces():
-    main = {"position": "center", "box": [100, 100, 300, 350]}  # 250 px tall
-    crowd = {"position": "left", "box": [10, 500, 30, 525]}  # 25 px tall
-    assert main_characters([main, crowd], image_height=1000) == [main]

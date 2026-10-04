@@ -5,6 +5,8 @@ callers take turns (app.py's lock).
 """
 import json
 import platform
+import queue
+import threading
 import time
 
 from llama_cpp import Llama
@@ -76,3 +78,45 @@ class Qwen:
                 chunks.close()
                 return
 
+
+class Turns:
+    """
+    Qwen for a caller that shares it with others (llama.cpp has one context):
+    each reply is generated in a thread that holds `lock` only while Qwen
+    writes, not while the caller sends the pieces on (to a slow client, say).
+    If the lock isn't free within `wait` seconds, the reply is empty, so the
+    caller can fall back to a plain sentence instead of failing.
+    """
+
+    def __init__(self, qwen, lock, wait):
+        self.qwen, self.lock, self.wait = qwen, lock, wait
+
+    def stream(self, messages, temperature, max_tokens):
+        if not self.lock.acquire(timeout=self.wait):
+            return
+        pieces = queue.Queue()
+
+        def generate():
+            try:
+                for piece in self.qwen.stream(messages, temperature, max_tokens):
+                    pieces.put(piece)
+            finally:
+                self.lock.release()
+                pieces.put(None)
+
+        threading.Thread(target=generate, daemon=True).start()
+        while (piece := pieces.get()) is not None:
+            yield piece
+
+
+def say(qwen, messages, max_tokens, fallback):
+    """
+    Qwen's reply as plain text, piece by piece as it's written, at temperature
+    0; `fallback` if it says nothing (it was cut off, or Qwen was busy).
+    """
+    said = False
+    for piece in qwen.stream(messages, temperature=0, max_tokens=max_tokens):
+        said = said or bool(piece.strip())
+        yield piece
+    if not said:
+        yield fallback

@@ -12,9 +12,9 @@ from PIL import Image, UnidentifiedImageError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from emotions import EmotionRecognizer
-from llm import Qwen
+from llm import Qwen, Turns
 from narrate import how_i_feel, story_intention, what_i_saw
-from recognize_feelings import express, find_feelings, mentions_a_person
+from recognize_feelings import feelings_events
 from recognizer import MOODS, ImageRecognizer
 from writer import GENRES, MAX_IDEAS, StoryWriter
 
@@ -22,6 +22,9 @@ MAX_SIDE = 1600  # downscale big images; the model resizes anyway
 # Bound on the description the page sends back, to keep prompts small.
 MAX_DESCRIPTION = 2000  # detailed descriptions run to about 700 characters
 WRITER_WAIT = 30  # seconds a story request waits for the writer before "busy"
+# Seconds a sentence of /analyze waits for Qwen (busy writing a story) before
+# it falls back to a plain sentence; describing a picture never fails on it.
+ANALYZE_WAIT = 5
 IDEA_SECONDS = 60 * 60  # how long a planned idea can still be written
 GENRE_CHOICES = 3  # genres the page offers for the story
 
@@ -59,14 +62,6 @@ def writer_turn():
         yield
     finally:
         writer_lock.release()
-
-
-class QwenTurns:
-    """The shared Qwen for what /analyze says, taking turns with the story writer."""
-
-    def stream(self, *args, **kwargs):
-        with writer_turn():
-            yield from qwen.stream(*args, **kwargs)
 
 
 @app.get("/")
@@ -123,6 +118,7 @@ def analyze():
     ({"saw": piece}, {"feelings": piece}, ...). Before a section, a status
     says what the app is doing ({"status": "Letting it sink in…", "for":
     "i_feel"}); the moods and genres to pick from follow their sentences.
+    The last line is {"done": true}, or {"error": ...} if something failed.
     """
     image, error = _read_image()
     if error:
@@ -132,17 +128,11 @@ def analyze():
         caption, description = recognizer.describe(image)
         yield {"caption": caption, "description": description}
         moods = recognizer.moods(image)
-        turns = QwenTurns()
+        turns = Turns(qwen, writer_lock, ANALYZE_WAIT)
         for piece in what_i_saw(turns, description, caption):
             yield {"saw": piece}
         # How the people in the picture feel; nothing when there's no person.
-        if mentions_a_person(description):
-            yield {"status": "Looking at their faces…", "for": "feelings"}
-        people = find_feelings(recognizer, emotions, image, description)
-        yield {"people": people}
-        if people:
-            for piece in express(turns, people):
-                yield {"feelings": piece}
+        yield from feelings_events(turns, recognizer, emotions, image, description)
         yield {"status": "Letting it sink in…", "for": "i_feel"}
         for piece in how_i_feel(turns, description, moods[0][0]):
             yield {"i_feel": piece}
@@ -151,14 +141,13 @@ def analyze():
         for piece in story_intention(turns, caption):
             yield {"story_intention": piece}
         yield {"genres": random.sample(list(GENRES), GENRE_CHOICES)}
+        yield {"done": True}
 
     def lines():
         # Once streaming has started, errors can't change the status code.
         try:
             for event in events():
                 yield json.dumps(event) + "\n"
-        except WriterBusy:
-            yield json.dumps({"error": "The app is busy writing a story. Try again in a minute."}) + "\n"
         except Exception:
             app.logger.exception("analyze failed")
             yield json.dumps({"error": "Something went wrong on the server. Please try again."}) + "\n"

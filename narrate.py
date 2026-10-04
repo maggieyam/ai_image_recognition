@@ -16,6 +16,9 @@ as Qwen writes it, so the page can show it while it's being written.
 
 If Qwen gives no answer, each section falls back to a plain sentence.
 """
+from llm import say
+from sentences import lower_first
+
 SAW_SYSTEM = (
     "Say what you saw in one or two short sentences, in the first person, starting "
     'with "I saw". Use only the description given. Write in English. Reply with only '
@@ -34,7 +37,7 @@ STORY_SYSTEM = (
 
 
 def what_i_saw(qwen, description, caption):
-    yield from _say(qwen, SAW_SYSTEM, f"Description: {description}", 80, f"I saw {_lower(caption)}")
+    yield from _say(qwen, SAW_SYSTEM, f"Description: {description}", 80, f"I saw {lower_first(caption)}")
 
 
 def how_i_feel(qwen, description, mood):
@@ -49,15 +52,5 @@ def story_intention(qwen, caption):
 
 
 def _say(qwen, system, facts, max_tokens, fallback):
-    """Qwen's words piece by piece; the fallback if it says nothing."""
     messages = [{"role": "system", "content": system}, {"role": "user", "content": facts}]
-    said = False
-    for piece in qwen.stream(messages, temperature=0, max_tokens=max_tokens):
-        said = said or bool(piece.strip())
-        yield piece
-    if not said:
-        yield fallback
-
-
-def _lower(caption):
-    return caption[:1].lower() + caption[1:]
+    yield from say(qwen, messages, max_tokens, fallback)

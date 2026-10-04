@@ -1,4 +1,4 @@
-from recognizer import _caption_and_description, _position
+from recognizer import MAX_PEOPLE, _caption_and_description, main_characters
 
 
 def test_drops_film_still_and_title_sentences():
@@ -19,7 +19,17 @@ def test_keeps_text_when_every_sentence_names_a_title():
     assert caption == "A poster for the film."
 
 
-def test_position_is_the_third_a_face_is_in():
-    assert _position([0, 0, 100, 100], width=900) == "left"
-    assert _position([400, 0, 500, 100], width=900) == "center"
-    assert _position([800, 0, 900, 100], width=900) == "right"
+def face(x, height):
+    return {"box": [x, 100, x + 50, 100 + height]}
+
+
+def test_main_characters_drop_background_faces():
+    main, crowd = face(100, 250), face(10, 25)  # 250 and 25 px tall in a 1000 px photo
+    assert main_characters([main, crowd], image_height=1000) == [main]
+
+
+def test_main_characters_keep_the_biggest_faces_left_to_right():
+    faces = [face(x, height) for x, height in [(500, 300), (0, 120), (300, 200), (100, 400), (700, 150), (900, 110)]]
+    kept = main_characters(faces, image_height=1000)
+    assert len(kept) == MAX_PEOPLE
+    assert [f["box"][0] for f in kept] == [100, 300, 500, 700]  # the 4 biggest, left to right

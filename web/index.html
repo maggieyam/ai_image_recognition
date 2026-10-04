@@ -140,8 +140,19 @@ function startResult(file) {
   const pickable = (group) => group.querySelectorAll(".chip").forEach((c) => c.onclick = () =>
     group.querySelectorAll(".chip").forEach((o) => o.setAttribute("aria-pressed", o === c)));
 
+  let streamed = false, finished = false, failed = false;
+  // An error keeps what's already shown and is added below it.
+  const fail = (message) => {
+    failed = true;
+    result.querySelectorAll(".thinking").forEach((el) => { el.hidden = true; });
+    if (!streamed) { result.innerHTML = ""; }
+    result.insertAdjacentHTML("beforeend", `<p class="say err">${esc(message)}</p>`);
+  };
+
   const onEvent = (event) => {
-    if (event.error) throw new Error(event.error);
+    streamed = true;
+    if (event.error) return fail(event.error);
+    if (event.done) { finished = true; return; }
     if (event.description) description = event.description;
     // A status shows, pulsing, where its section's sentence will appear.
     if (event.status) {
@@ -166,13 +177,17 @@ function startResult(file) {
       el.textContent += event[key];
     }
   };
+  // The story button only appears once everything has arrived; a stream that
+  // ends without "done" was cut off.
   const done = () => {
+    if (failed) return;
+    if (!finished) return fail("The connection was cut off before I finished. Please try again.");
     $("story-row").hidden = false;
     $("story-go").onclick = () => brainstorm(file, description,
       result.querySelector("[data-mood][aria-pressed=true]")?.dataset.mood,
       result.querySelector("[data-genre][aria-pressed=true]")?.dataset.genre, $("story-count").value);
   };
-  return { onEvent, done };
+  return { onEvent, done, fail };
 }
 
 // POST a FormData and hand each JSON line of the streamed reply to onEvent
@@ -282,17 +297,19 @@ function esc(s) { const d = document.createElement("div"); d.textContent = s; re
 
 form.onsubmit = async (e) => {
   e.preventDefault();
+  let shown;
   $("go").disabled = true; $("go").textContent = "Analyzing…";
   result.innerHTML = '<span class="muted">Working… the first request can take a few seconds.</span>';
   try {
     const file = $("file").files[0] && await shrink($("file").files[0]);
     const data = new FormData();
     if (file) data.append("file", file);
-    const shown = startResult(file);
+    shown = startResult(file);
     await postStream("/analyze", data, shown.onEvent);
     shown.done();
   } catch (err) {
-    result.innerHTML = `<span class="err">${esc(err.message)}</span>`;
+    if (shown) shown.fail(err.message);
+    else result.innerHTML = `<span class="err">${esc(err.message)}</span>`;
   } finally {
     $("go").disabled = false; $("go").textContent = "Describe image";
   }

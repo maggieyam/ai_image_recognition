@@ -1,12 +1,12 @@
 """
 What the app says about a picture, section by section, in the first person.
 Each section is its own narrow Qwen call (llm.py) at temperature 0, given
-only the facts it needs; Qwen never sees the picture. How the people in the
-picture feel is recognize_feelings.py. Each section is yielded piece by piece
+only the facts it needs; Qwen never sees the picture. How the characters in
+the picture feel is recognize_feelings.py. Each section is yielded piece by piece
 as Qwen writes it, so the page can show it while it's being written.
 
 1. what_i_saw: Florence-2's description -> "I saw ..."
-2. (recognize_feelings: how the people feel, if there are any)
+2. (recognize_feelings: how the characters feel, if there are any)
 3. how_i_feel: the app's mood (CLIP) and why -> "I feel ..., because ..."
 4. story_intention: the app offers to write a story and asks which genre the
    user would like. Qwen only gets the short caption: given the whole

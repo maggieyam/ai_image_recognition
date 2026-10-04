@@ -61,13 +61,13 @@ def finder(yunet, florence):
 
 def test_florence_looks_for_a_close_up_yunet_missed():
     f = finder(yunet=[[0, 0, 10, 10]], florence=[[100, 100, 400, 450]])  # only a tiny face in the background
-    assert [p["box"] for p in f.find_people(Image.new("RGB", (500, 500)))] == [[100, 100, 400, 450]]
+    assert [c["box"] for c in f.find_characters(Image.new("RGB", (500, 500)))] == [[100, 100, 400, 450]]
 
 
 def test_a_crowd_of_small_faces_doesnt_make_florence_look():
     crowd = [[x, 10, x + 10, 20] for x in range(0, 100, 20)]
     f = finder(yunet=crowd, florence=[])
-    assert f.find_people(Image.new("RGB", (500, 500))) == [] and f.florence_calls == 0
+    assert f.find_characters(Image.new("RGB", (500, 500))) == [] and f.florence_calls == 0
 
 
 class FakeResponse:

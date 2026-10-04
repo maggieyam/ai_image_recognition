@@ -178,7 +178,7 @@ class ImageRecognizer:
             for p, i in zip(top.values.tolist(), top.indices.tolist())
         ]
 
-    def find_people(self, image):
+    def find_characters(self, image):
         """
         The main characters in a PIL image, found by their faces, as
         [{"character": "a woman in a white dress", "box": [x1, y1, x2, y2],
@@ -187,15 +187,15 @@ class ImageRecognizer:
         object detection looks for them instead.
         """
         faces = self._yunet_faces(image)
-        people = main_characters([{"box": b} for b in faces], image.height)
+        characters = main_characters([{"box": b} for b in faces], image.height)
         # YuNet misses close-ups filling the frame, sometimes finding just a
         # small face in the background. Several small faces are a crowd, though,
         # so Florence-2 (slower) only looks when YuNet found at most one.
-        if not people and len(faces) <= 1:
-            people = main_characters([{"box": b} for b in self._florence_faces(image)], image.height)
-        for person in people:
-            person.update(character=self._who(image, person["box"]), face=image.crop(person["box"]))
-        return people
+        if not characters and len(faces) <= 1:
+            characters = main_characters([{"box": b} for b in self._florence_faces(image)], image.height)
+        for c in characters:
+            c.update(character=self._who(image, c["box"]), face=image.crop(c["box"]))
+        return characters
 
     def _yunet_faces(self, image):
         bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)

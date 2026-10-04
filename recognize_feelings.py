@@ -1,11 +1,11 @@
 """
-Recognizing how the people in a photo feel. This module does the
+Recognizing how the characters in a photo feel. This module does the
 orchestration; Qwen (llm.py) only puts the face model's results into words.
 
 1. YuNet and Florence-2 (recognizer.py): find the main characters by their
    faces, and say who each one is.
-2. Code: for each person, the emotion model (emotions.py) reads their face.
-3. Qwen: put the people and their feelings, as JSON, into words, streamed as
+2. Code: for each character, the emotion model (emotions.py) reads their face.
+3. Qwen: put the characters and their feelings, as JSON, into words, streamed as
    it writes. Qwen sees no photo, only those facts, so it can relate them
    ("the man is angry, and the girl is crying, so she must be sad").
 
@@ -40,47 +40,47 @@ FEELING_WORDS = {
 
 def feelings_events(qwen, recognizer, emotions, image):
     """
-    How the people in a photo feel, as /analyze events: a status while their
-    faces are read, the people found ([] if none), then Qwen's words piece by
-    piece. `qwen` is an llm.Turns, `recognizer` finds the people (YuNet and
+    How the characters in a photo feel, as /analyze events: a status while
+    their faces are read, the characters found ([] if none), then Qwen's words
+    piece by piece. `qwen` is an llm.Turns, `recognizer` finds the characters (YuNet and
     Florence-2), `emotions` reads each face, one at a time.
     """
     yield {"status": "Looking at their faces…", "for": "feelings"}
-    # Feelings are optional: if a face can't be read, that person is left out,
+    # Feelings are optional: if a face can't be read, that character is left out,
     # and the rest of what the app says still follows.
     try:
-        found = recognizer.find_people(image)
+        found = recognizer.find_characters(image)
     except Exception:
-        logging.exception("finding the people failed")
+        logging.exception("finding the characters failed")
         found = []
-    people = []
-    for person in found:
+    characters = []
+    for c in found:
         try:
-            person.update(emotions.recognize(person.pop("face")))
+            c.update(emotions.recognize(c.pop("face")))
         except Exception:
             logging.exception("reading a face failed")
             continue
-        people.append(person)
-    yield {"people": people}
-    if people:
-        for piece in express(qwen, people):
+        characters.append(c)
+    yield {"characters": characters}
+    if characters:
+        for piece in express(qwen, characters):
             yield {"feelings": piece}
 
 
-def express(qwen, people):
+def express(qwen, characters):
     """
-    How the people feel, in words yielded as Qwen writes them, from who each
+    How the characters feel, in words yielded as Qwen writes them, from who each
     one is and the emotion read from their face:
     [{"character": "a woman in a red dress", "emotion": "Sadness"}, ...].
     """
-    facts = [{"character": p["character"], "feeling": _feeling(p)} for p in people]
+    facts = [{"character": c["character"], "feeling": _feeling(c)} for c in characters]
     messages = [
         {"role": "system", "content": EXPRESS_SYSTEM},
         {"role": "user", "content": json.dumps(facts)},
     ]
     fallback = " ".join(f"{upper_first(f['character'])} looks {f['feeling']}." for f in facts)
-    yield from say(qwen, messages, 20 + 30 * len(people), fallback)
+    yield from say(qwen, messages, 20 + 30 * len(characters), fallback)
 
 
-def _feeling(person):
-    return FEELING_WORDS.get(person["emotion"], person["emotion"].lower())
+def _feeling(character):
+    return FEELING_WORDS.get(character["emotion"], character["emotion"].lower())

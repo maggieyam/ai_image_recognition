@@ -120,7 +120,7 @@ async function shrink(file) {
 
 // What the app says about the picture, in its own words, shown while it's
 // being written (each sentence is its own Qwen call): what it saw, how the
-// people feel (only when there are people), how it feels, and the story it
+// characters feel (only when it finds any), how it feels, and the story it
 // offers to write. The mood chips pick the story's mood and the genre chips
 // its genre (first one by default). `file` is the image that was described;
 // brainstorming sends it again, with its description.
@@ -161,7 +161,7 @@ function startResult(file) {
       const el = $(event.for);
       el.hidden = false; el.classList.add("thinking"); el.textContent = event.status;
     }
-    if (event.people && !event.people.length) $("feelings").hidden = true;
+    if (event.characters && !event.characters.length) $("feelings").hidden = true;
     if (event.moods) {
       $("moods").innerHTML = event.moods.map((m, i) =>
         chip("mood", m.mood, `${esc(m.mood)}<span class="pct">${Math.round(m.score * 100)}%</span>`, i === 0)).join("");

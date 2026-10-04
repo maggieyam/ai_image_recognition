@@ -144,7 +144,7 @@ def analyze():
         turns = Turns(qwen, writer_lock, ANALYZE_WAIT, defer=lambda: stories_waiting > 0)
         for piece in what_i_saw(turns, description, caption):
             yield {"saw": piece}
-        # How the people in the picture feel; nothing when no face is found.
+        # How the characters in the picture feel; nothing when no face is found.
         yield from feelings_events(turns, recognizer, emotions, image)
         yield {"status": "Letting it sink in…", "for": "i_feel"}
         for piece in how_i_feel(turns, description, moods[0][0]):

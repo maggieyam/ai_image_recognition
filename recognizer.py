@@ -12,6 +12,7 @@ from transformers import (
     Florence2ForConditionalGeneration,
 )
 
+from recognize_feelings import main_characters
 from sentences import split_sentences
 
 MODELS_DIR = Path(__file__).parent / "models"
@@ -143,6 +144,50 @@ class ImageRecognizer:
             for p, i in zip(top.values.tolist(), top.indices.tolist())
         ]
 
+    def find_people(self, image):
+        """
+        The main characters in a PIL image, found by their faces, as
+        [{"human": "a woman in a white dress", "position": "left",
+          "box": [x1, y1, x2, y2], "face": <the face, cropped>}, ...].
+        Faces too small to be a main character (a crowd behind) are dropped.
+        """
+        inputs = self.florence_processor(text="<OD>", images=image, return_tensors="pt").to(
+            self.device
+        )
+        with torch.no_grad():
+            out = self.florence_model.generate(**inputs, max_new_tokens=256)
+        found = self.florence_processor.post_process_generation(
+            self.florence_processor.batch_decode(out, skip_special_tokens=False)[0],
+            task="<OD>",
+            image_size=image.size,
+        )["<OD>"]
+        boxes = [
+            [round(x) for x in box]
+            for label, box in zip(found["labels"], found["bboxes"])
+            if label.lower() == "human face"
+        ]
+        people = main_characters([{"box": box} for box in boxes], image.height)
+        for person in people:
+            person.update(
+                human=self._who(image, person["box"]),
+                position=_position(person["box"], image.width),
+                face=image.crop(person["box"]),
+            )
+        return people
+
+    def _who(self, image, box):
+        """
+        Who a face belongs to ("a woman in a white dress"): Florence-2's caption
+        of the area around the face, which takes in their hair and clothes.
+        """
+        x1, y1, x2, y2 = box
+        w, h = x2 - x1, y2 - y1
+        around = image.crop(
+            (max(0, x1 - w), max(0, y1 - h // 2), min(image.width, x2 + w), min(image.height, y2 + 3 * h))
+        )
+        caption = self._florence(around, "<CAPTION>", max_new_tokens=20).rstrip(".")
+        return caption[:1].lower() + caption[1:]
+
     def _florence(self, image, task, max_new_tokens):
         inputs = self.florence_processor(text=task, images=image, return_tensors="pt").to(
             self.device
@@ -171,6 +216,12 @@ class ImageRecognizer:
             mean = text.mean(dim=0)
             vectors.append(mean / mean.norm())
         return torch.stack(vectors)
+
+
+def _position(box, width):
+    """Where a box sits across the picture: "left", "center" or "right" third."""
+    middle = (box[0] + box[2]) / 2
+    return "left" if middle < width / 3 else "right" if middle > 2 * width / 3 else "center"
 
 
 def _caption_and_description(text):

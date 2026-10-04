@@ -101,3 +101,17 @@ def test_write_trims_to_whole_sentences(story_writer, monkeypatch):
 def test_sensible_rejects_non_stories(change):
     assert writer._sensible(SEED, DESCRIPTION)
     assert not writer._sensible({**SEED, **change}, DESCRIPTION)
+
+
+def test_plan_uses_the_chosen_genre(story_writer, monkeypatch):
+    monkeypatch.setattr(story_writer, "_grounded_ideas", lambda *args: (["a nurse", "a pilot"], []))
+    seen = []
+
+    def pick(description, mood, combos, count):
+        seen.extend(combos)
+        return combos[:count], []
+
+    monkeypatch.setattr(story_writer, "_pick", pick)
+    plan = story_writer.plan(DESCRIPTION, "happy", count=2, genre="comedy")
+    assert plan["options"]["genre"] == ["comedy"]
+    assert {c["genre"] for c in seen} == {"comedy"}

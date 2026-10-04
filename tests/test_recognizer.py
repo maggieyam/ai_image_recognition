@@ -1,4 +1,4 @@
-from recognizer import _caption_and_description
+from recognizer import _caption_and_description, _position
 
 
 def test_drops_film_still_and_title_sentences():
@@ -17,3 +17,9 @@ def test_keeps_text_when_every_sentence_names_a_title():
     caption, description = _caption_and_description('A poster for the film "Moon River".')
     assert description == "A poster for the film."
     assert caption == "A poster for the film."
+
+
+def test_position_is_the_third_a_face_is_in():
+    assert _position([0, 0, 100, 100], width=900) == "left"
+    assert _position([400, 0, 500, 100], width=900) == "center"
+    assert _position([800, 0, 900, 100], width=900) == "right"

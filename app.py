@@ -1,22 +1,29 @@
+import json
 import os
+import random
 import threading
 from contextlib import contextmanager
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from PIL import Image, UnidentifiedImageError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from emotions import EmotionRecognizer
+from llm import Qwen
+from narrate import how_i_feel, story_intention, what_i_saw
+from recognize_feelings import express, find_feelings, mentions_a_person
 from recognizer import MOODS, ImageRecognizer
-from writer import MAX_IDEAS, StoryWriter
+from writer import GENRES, MAX_IDEAS, StoryWriter
 
 MAX_SIDE = 1600  # downscale big images; the model resizes anyway
 # Bound on the description the page sends back, to keep prompts small.
 MAX_DESCRIPTION = 2000  # detailed descriptions run to about 700 characters
 WRITER_WAIT = 30  # seconds a story request waits for the writer before "busy"
 IDEA_SECONDS = 60 * 60  # how long a planned idea can still be written
+GENRE_CHOICES = 3  # genres the page offers for the story
 
 app = Flask(__name__, template_folder="web")
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB uploads
@@ -27,8 +34,10 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 limiter = Limiter(get_remote_address, app=app, storage_uri="memory://")
 
 recognizer = ImageRecognizer()
-writer = StoryWriter()
-# llama.cpp's model has a single context, so story requests take turns.
+emotions = EmotionRecognizer()
+qwen = Qwen()  # shared by the story writer and recognize_feelings
+writer = StoryWriter(qwen)
+# Qwen (llama.cpp) has a single context, so requests that use it take turns.
 # Florence-2 and CLIP are safe to run from several threads at once.
 writer_lock = threading.Lock()
 # Planned ideas are signed, so /story/write only writes what /story/plan
@@ -50,6 +59,14 @@ def writer_turn():
         yield
     finally:
         writer_lock.release()
+
+
+class QwenTurns:
+    """The shared Qwen for what /analyze says, taking turns with the story writer."""
+
+    def stream(self, *args, **kwargs):
+        with writer_turn():
+            yield from qwen.stream(*args, **kwargs)
 
 
 @app.get("/")
@@ -80,6 +97,12 @@ def _read_mood(mood):
     return None
 
 
+def _read_genre(genre):
+    if genre is not None and genre not in GENRES:
+        return jsonify(error="Pick one of the listed genres."), 400
+    return None
+
+
 def _read_description(description):
     if (
         not isinstance(description, str)
@@ -93,17 +116,54 @@ def _read_description(description):
 @app.post("/analyze")
 @limiter.limit("10 per minute; 100 per day")
 def analyze():
+    """
+    What the app makes of a picture, streamed as JSON lines so the page can
+    show each part as soon as it's ready: the caption and description, then
+    what the app says, section by section, each as Qwen writes it
+    ({"saw": piece}, {"feelings": piece}, ...). Before a section, a status
+    says what the app is doing ({"status": "Letting it sink in…", "for":
+    "i_feel"}); the moods and genres to pick from follow their sentences.
+    """
     image, error = _read_image()
     if error:
         return error
 
-    caption, description = recognizer.describe(image)
-    moods = recognizer.moods(image)
-    return jsonify(
-        caption=caption,
-        description=description,
-        moods=[{"mood": m, "score": p} for m, p in moods],
-    )
+    def events():
+        caption, description = recognizer.describe(image)
+        yield {"caption": caption, "description": description}
+        moods = recognizer.moods(image)
+        turns = QwenTurns()
+        for piece in what_i_saw(turns, description, caption):
+            yield {"saw": piece}
+        # How the people in the picture feel; nothing when there's no person.
+        if mentions_a_person(description):
+            yield {"status": "Looking at their faces…", "for": "feelings"}
+        people = find_feelings(recognizer, emotions, image, description)
+        yield {"people": people}
+        if people:
+            for piece in express(turns, people):
+                yield {"feelings": piece}
+        yield {"status": "Letting it sink in…", "for": "i_feel"}
+        for piece in how_i_feel(turns, description, moods[0][0]):
+            yield {"i_feel": piece}
+        yield {"moods": [{"mood": m, "score": p} for m, p in moods]}
+        yield {"status": "Thinking of a story…", "for": "story_intention"}
+        for piece in story_intention(turns, caption):
+            yield {"story_intention": piece}
+        yield {"genres": random.sample(list(GENRES), GENRE_CHOICES)}
+
+    def lines():
+        # Once streaming has started, errors can't change the status code.
+        try:
+            for event in events():
+                yield json.dumps(event) + "\n"
+        except WriterBusy:
+            yield json.dumps({"error": "The app is busy writing a story. Try again in a minute."}) + "\n"
+        except Exception:
+            app.logger.exception("analyze failed")
+            yield json.dumps({"error": "Something went wrong on the server. Please try again."}) + "\n"
+
+    return Response(stream_with_context(lines()), mimetype="application/x-ndjson")
 
 
 @app.post("/story/plan")
@@ -117,7 +177,8 @@ def story_plan():
     """
     image, error = _read_image()
     mood, description = request.form.get("mood"), request.form.get("description")
-    error = error or _read_mood(mood) or _read_description(description)
+    genre = request.form.get("genre")
+    error = error or _read_mood(mood) or _read_genre(genre) or _read_description(description)
     if error:
         return error
     count = request.form.get("count", str(MAX_IDEAS))
@@ -128,7 +189,11 @@ def story_plan():
     image_vec = recognizer.image_vector(image)  # once, for every grounding check
     with writer_turn():
         plan = writer.plan(
-            description, mood, int(count), match=lambda texts: recognizer.match(image_vec, texts)
+            description,
+            mood,
+            int(count),
+            match=lambda texts: recognizer.match(image_vec, texts),
+            genre=genre,
         )
     if plan is None:
         return jsonify(error="Couldn't come up with ideas that fit this picture. Try again."), 503

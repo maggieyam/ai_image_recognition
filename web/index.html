@@ -33,6 +33,10 @@
           color:var(--text); font:inherit; font-size:13px; cursor:pointer; }
   .chip[aria-pressed=true] { border-color:var(--accent); background:var(--accent); color:#fff; }
   .chip .pct { opacity:.7; margin-left:4px; }
+  .say { margin:14px 0 0; }
+  /* What the app is doing before its next sentence, e.g. "Letting it sink in…". */
+  .thinking { color:var(--muted); animation:pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.35; } }
   button.go.alt { background:transparent; color:var(--accent); border:1px solid var(--accent); }
   .row { display:flex; gap:8px; align-items:stretch; }
   .row .go { flex:1; }
@@ -112,24 +116,87 @@ async function shrink(file) {
   return blob ? new File([blob], "image.jpg", { type: "image/jpeg" }) : file;
 }
 
-// Mood chips pick which mood the story is written in (top one by default).
-// `file` is the image that was described; brainstorming sends it again,
-// with its description.
-function showResult({ caption, description, moods = [] }, file) {
-  const chips = moods.map((m, i) =>
-    `<button type="button" class="chip" data-mood="${esc(m.mood)}" aria-pressed="${i === 0}">`
-    + `${esc(m.mood)}<span class="pct">${Math.round(m.score * 100)}%</span></button>`).join("");
-  result.innerHTML = `<div class="muted">This looks like</div><div class="caption">${esc(caption)}</div>`
-    + `<div class="muted label">Mood — pick one for the story</div><div class="moods">${chips}</div>`
-    + `<div class="row"><button type="button" class="go alt" id="story-go">Brainstorm story ideas</button>`
+// What the app says about the picture, in its own words, shown while it's
+// being written (each sentence is its own Qwen call): what it saw, how the
+// people feel (only when there are people), how it feels, and the story it
+// offers to write. The mood chips pick the story's mood and the genre chips
+// its genre (first one by default). `file` is the image that was described;
+// brainstorming sends it again, with its description.
+const SECTIONS = ["saw", "feelings", "i_feel", "story_intention"];
+
+function startResult(file) {
+  result.innerHTML = `<div class="caption thinking" id="saw">Looking at the picture…</div>`
+    + `<p class="say" id="feelings" hidden></p>`
+    + `<p class="say" id="i_feel" hidden></p><div class="moods" id="moods"></div>`
+    + `<p class="say" id="story_intention" hidden></p><div class="moods" id="genres"></div>`
+    + `<div class="row" id="story-row" hidden><button type="button" class="go alt" id="story-go">Brainstorm story ideas</button>`
     + `<select id="story-count" aria-label="Number of ideas"><option value="1">1 idea</option>`
     + `<option value="2">2 ideas</option><option value="3" selected>3 ideas</option></select></div>`
     + `<div class="story" id="story"></div>`;
+  let description = "";
+  const chip = (key, value, label, pressed) =>
+    `<button type="button" class="chip" data-${key}="${esc(value)}" aria-pressed="${pressed}">${label}</button>`;
+  // Each chip group has its own pick.
+  const pickable = (group) => group.querySelectorAll(".chip").forEach((c) => c.onclick = () =>
+    group.querySelectorAll(".chip").forEach((o) => o.setAttribute("aria-pressed", o === c)));
 
-  result.querySelectorAll(".chip").forEach((chip) => chip.onclick = () =>
-    result.querySelectorAll(".chip").forEach((c) => c.setAttribute("aria-pressed", c === chip)));
-  $("story-go").onclick = () => brainstorm(file, description,
-    result.querySelector(".chip[aria-pressed=true]")?.dataset.mood, $("story-count").value);
+  const onEvent = (event) => {
+    if (event.error) throw new Error(event.error);
+    if (event.description) description = event.description;
+    // A status shows, pulsing, where its section's sentence will appear.
+    if (event.status) {
+      const el = $(event.for);
+      el.hidden = false; el.classList.add("thinking"); el.textContent = event.status;
+    }
+    if (event.people && !event.people.length) $("feelings").hidden = true;
+    if (event.moods) {
+      $("moods").innerHTML = event.moods.map((m, i) =>
+        chip("mood", m.mood, `${esc(m.mood)}<span class="pct">${Math.round(m.score * 100)}%</span>`, i === 0)).join("");
+      pickable($("moods"));
+    }
+    if (event.genres) {
+      $("genres").innerHTML = event.genres.map((g, i) => chip("genre", g, esc(g), i === 0)).join("");
+      pickable($("genres"));
+    }
+    for (const key of SECTIONS) {
+      if (event[key] === undefined) continue;
+      const el = $(key);
+      if (el.classList.contains("thinking")) { el.classList.remove("thinking"); el.textContent = ""; }
+      el.hidden = false;
+      el.textContent += event[key];
+    }
+  };
+  const done = () => {
+    $("story-row").hidden = false;
+    $("story-go").onclick = () => brainstorm(file, description,
+      result.querySelector("[data-mood][aria-pressed=true]")?.dataset.mood,
+      result.querySelector("[data-genre][aria-pressed=true]")?.dataset.genre, $("story-count").value);
+  };
+  return { onEvent, done };
+}
+
+// POST a FormData and hand each JSON line of the streamed reply to onEvent
+// as it arrives. Errors before streaming starts come back as JSON.
+async function postStream(url, body, onEvent) {
+  const res = await fetch(url, { method: "POST", body });
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    const message = json.error || `Something went wrong (error ${res.status}). Please try again.`;
+    throw Object.assign(new Error(message), { status: res.status });
+  }
+  const reader = res.body.getReader(), decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let end;
+    while ((end = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, end);
+      buffer = buffer.slice(end + 1);
+      if (line) onEvent(JSON.parse(line));
+    }
+  }
 }
 
 // POST a FormData as-is, or anything else as JSON. Errors carry the HTTP
@@ -149,7 +216,7 @@ async function post(url, body) {
 // Plan first (brainstorm + pick), then write each picked idea in turn so
 // results show up one by one instead of after the whole batch. An idea the
 // writer can't manage (422) is swapped for a spare rather than asked again.
-async function brainstorm(file, description, mood, count) {
+async function brainstorm(file, description, mood, genre, count) {
   const go = $("story-go"), out = $("story");
   go.disabled = true; go.textContent = "Brainstorming…";
   out.innerHTML = '<span class="muted">Brainstorming… this takes a while.</span>';
@@ -157,6 +224,7 @@ async function brainstorm(file, description, mood, count) {
     const form = new FormData();
     form.append("file", file); form.append("description", description);
     form.append("mood", mood); form.append("count", count);
+    if (genre) form.append("genre", genre);
     const { options, rejected, ideas, spares } = await post("/story/plan", form);
     const list = (values) => `<ul>${values.map((v) => `<li>${esc(v)}</li>`).join("")}</ul>`;
     const lists = Object.entries(options).map(([aspect, values]) =>
@@ -220,7 +288,9 @@ form.onsubmit = async (e) => {
     const file = $("file").files[0] && await shrink($("file").files[0]);
     const data = new FormData();
     if (file) data.append("file", file);
-    showResult(await post("/analyze", data), file);
+    const shown = startResult(file);
+    await postStream("/analyze", data, shown.onEvent);
+    shown.done();
   } catch (err) {
     result.innerHTML = `<span class="err">${esc(err.message)}</span>`;
   } finally {

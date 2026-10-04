@@ -10,3 +10,4 @@ llama-cpp-python  # builds llama.cpp from source on install
 flask
 flask-limiter
 gunicorn
+emotiefflib  # facial-emotion model (ONNX); weights download to ~/.emotiefflib

@@ -48,8 +48,6 @@ Keep it to one worker: each worker loads its own 2.2 GB of models, and rate limi
 
 To run the tests (no models needed): `pip install pytest && pytest`.
 
-To evaluate how well the app recognizes people's feelings on real pictures: `python evals/recognize_feelings_eval.py`. It needs the [OASIS](https://osf.io/6pnd7/) pictures in `data/oasis/` (datasets are never committed) and saves its results to `data/evals/`.
-
 To try the models from the command line: `python recognizer.py images/*.jpg` prints each image's caption, moods and detailed description.
 
 ## About

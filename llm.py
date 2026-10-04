@@ -104,15 +104,6 @@ class Turns:
         while (piece := pieces.get()) is not None:
             yield piece
 
-    def ask(self, messages, schema, temperature, max_tokens):
-        """Qwen.ask in turn; None if cut off, or if Qwen wasn't free (see above)."""
-        if not self._take_turn():
-            return None
-        try:
-            return self.qwen.ask(messages, schema, temperature, max_tokens)
-        finally:
-            self.lock.release()
-
     def _take_turn(self):
         """
         Take the lock, waiting in short steps so a story request that starts

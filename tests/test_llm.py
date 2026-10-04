@@ -12,10 +12,6 @@ class FakeQwen:
         self.calls += 1
         yield from self.reply
 
-    def ask(self, messages, schema, temperature, max_tokens):
-        self.calls += 1
-        return {"answer": "".join(self.reply)}
-
 
 def test_turns_streams_and_frees_the_lock_once_qwen_is_done():
     lock = threading.Lock()
@@ -29,19 +25,6 @@ def test_turns_frees_the_lock_even_if_the_caller_stops_reading():
     next(pieces)
     pieces.close()  # e.g. the page went away
     assert lock.acquire(timeout=1)
-
-
-def test_turns_asks_in_turn_and_frees_the_lock():
-    lock = threading.Lock()
-    assert Turns(FakeQwen(["yes"]), lock, wait=1).ask([], {}, 0, 10) == {"answer": "yes"}
-    assert lock.acquire(blocking=False)
-
-
-def test_turns_has_no_answer_when_qwen_stays_busy():
-    lock, qwen = threading.Lock(), FakeQwen(["yes"])
-    lock.acquire()  # the story writer has Qwen
-    assert Turns(qwen, lock, wait=0.1).ask([], {}, 0, 10) is None
-    assert qwen.calls == 0
 
 
 def test_turns_says_nothing_when_qwen_stays_busy():

@@ -177,7 +177,7 @@ class ImageRecognizer:
     def find_people(self, image):
         """
         The main characters in a PIL image, found by their faces, as
-        [{"human": "a woman in a white dress", "box": [x1, y1, x2, y2],
+        [{"character": "a woman in a white dress", "box": [x1, y1, x2, y2],
           "face": <the face, cropped>}, ...], left to right. YuNet finds the
         faces; when it misses a close-up filling the frame, Florence-2's
         object detection looks for them instead.
@@ -190,7 +190,7 @@ class ImageRecognizer:
         if not people and len(faces) <= 1:
             people = main_characters([{"box": b} for b in self._florence_faces(image)], image.height)
         for person in people:
-            person.update(human=self._who(image, person["box"]), face=image.crop(person["box"]))
+            person.update(character=self._who(image, person["box"]), face=image.crop(person["box"]))
         return people
 
     def _yunet_faces(self, image):

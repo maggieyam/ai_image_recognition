@@ -1,13 +1,14 @@
 """
-Qwen, the small language model the app shares: the story writer, narrate and
-recognize_feelings all ask it questions, so it's loaded once. llama.cpp has a
-single context, so callers take turns (app.py's lock).
+Qwen, the small language model the brain shares: the story writer and
+everything the brain says ask it questions, so it's loaded once. llama.cpp
+has a single context, so callers take turns (SharedQwen).
 """
 import json
 import platform
 import queue
 import threading
 import time
+from contextlib import contextmanager
 
 from llama_cpp import Llama
 
@@ -78,7 +79,7 @@ class Turns:
     each reply is generated in a thread that holds `lock` only while Qwen
     writes, not while the caller sends the pieces on (to a slow client, say).
     The reply is empty, so the caller can fall back to a plain sentence, when:
-    - `defer()` is true (others go first, e.g. a story request waiting);
+    - `defer()` is true (others go first, e.g. a story waiting in SharedQwen.hold);
     - the lock isn't free within `wait` seconds. After that, this Turns stops
       waiting: one wait per caller, not one per reply.
     """
@@ -121,14 +122,44 @@ class Turns:
         return False
 
 
-def say(qwen, messages, max_tokens, fallback):
+class Busy(Exception):
+    """Qwen stayed taken for longer than the caller could wait."""
+
+
+class SharedQwen:
     """
-    Qwen's reply as plain text, piece by piece as it's written, at temperature
-    0; `fallback` if it says nothing (it was cut off, or Qwen was busy).
+    Who gets Qwen next. Stories hold it for a whole plan or story, and go
+    first; what the brain says about a picture takes it a sentence at a time,
+    and makes way while a story is waiting (see Turns).
     """
-    said = False
-    for piece in qwen.stream(messages, temperature=0, max_tokens=max_tokens):
-        said = said or bool(piece.strip())
-        yield piece
-    if not said:
-        yield fallback
+
+    def __init__(self, qwen):
+        self.qwen = qwen
+        # Qwen (llama.cpp) has a single context, so callers that use it take turns.
+        self.lock = threading.Lock()
+        self.waiting = 0  # callers waiting in hold()
+        self.waiting_lock = threading.Lock()
+
+    @contextmanager
+    def hold(self, wait):
+        """Hold Qwen, or raise Busy after `wait` seconds."""
+        with self.waiting_lock:
+            self.waiting += 1
+        try:
+            got_it = self.lock.acquire(timeout=wait)
+        finally:
+            with self.waiting_lock:
+                self.waiting -= 1
+        if not got_it:
+            raise Busy
+        try:
+            yield
+        finally:
+            self.lock.release()
+
+    def in_passing(self, wait):
+        """
+        Qwen for one caller's sentences: a Turns that waits up to `wait`
+        seconds for it, once, and lets whoever is waiting in hold() go first.
+        """
+        return Turns(self.qwen, self.lock, wait, defer=lambda: self.waiting > 0)

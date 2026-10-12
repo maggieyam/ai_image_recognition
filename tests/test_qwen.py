@@ -1,7 +1,9 @@
 import threading
 import time
 
-from llm import Qwen, Turns, say
+import pytest
+
+from brain.networks.qwen import Busy, Qwen, SharedQwen, Turns
 
 
 class FakeQwen:
@@ -32,11 +34,6 @@ def test_turns_says_nothing_when_qwen_stays_busy():
     lock.acquire()  # the story writer has Qwen
     assert list(Turns(qwen, lock, wait=0.1).stream([], 0, 10)) == []
     assert qwen.calls == 0
-
-
-def test_say_falls_back_when_qwen_says_nothing():
-    assert "".join(say(FakeQwen([]), [], 10, "It makes me feel calm.")) == "It makes me feel calm."
-    assert "".join(say(FakeQwen(["I feel ", "calm."]), [], 10, "fallback")) == "I feel calm."
 
 
 def test_turns_waits_once_per_caller_then_stops_waiting():
@@ -82,3 +79,30 @@ def test_a_story_request_that_starts_waiting_meanwhile_still_goes_first():
     start = time.monotonic()
     assert list(turns.stream([], 0, 10)) == []
     assert time.monotonic() - start < 1 and not turns.gave_up and qwen.calls == 0
+
+
+def test_a_story_holds_qwen_and_frees_it_afterwards():
+    shared = SharedQwen(FakeQwen(["Hi"]))
+    with shared.hold(wait=1):
+        assert shared.lock.locked() and shared.waiting == 0  # holding isn't waiting
+        assert list(shared.in_passing(wait=0.1).stream([], 0, 10)) == []  # a sentence can't cut in
+    assert list(shared.in_passing(wait=1).stream([], 0, 10)) == ["Hi"]
+
+
+def test_a_story_is_told_qwen_is_busy_once_it_has_waited():
+    shared = SharedQwen(FakeQwen(["Hi"]))
+    with shared.hold(wait=1):
+        with pytest.raises(Busy):
+            with shared.hold(wait=0.1):
+                pass
+        assert shared.waiting == 0
+    assert shared.lock.acquire(blocking=False)  # the story that gave up didn't take or free it
+
+
+def test_sentences_make_way_for_a_story_thats_waiting():
+    shared = SharedQwen(FakeQwen(["Hi"]))
+    sentences = shared.in_passing(wait=5)
+    shared.waiting = 1  # a story is waiting in hold()
+    start = time.monotonic()
+    assert list(sentences.stream([], 0, 10)) == []
+    assert time.monotonic() - start < 1 and shared.qwen.calls == 0

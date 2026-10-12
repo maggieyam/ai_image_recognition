@@ -1,8 +1,7 @@
 import pytest
 
-import writer
-from sentences import split_sentences
-from writer import BRAINSTORM_IDEAS, GROUNDING_MIN, MAX_TRIES, StoryWriter
+from brain.imagination import story as writer
+from brain.imagination.story import BRAINSTORM_IDEAS, GROUNDING_MIN, MAX_TRIES, StoryWriter
 
 DESCRIPTION = "A man in a white robe walks alone across sand dunes under a clear blue sky."
 SEED = {
@@ -21,10 +20,6 @@ SEED = {
 def story_writer():
     """A StoryWriter without its model; tests stub the methods that call it."""
     return StoryWriter.__new__(StoryWriter)
-
-
-def test_split_sentences_keeps_titles():
-    assert split_sentences("He met Mrs. Brown. She smiled!") == ["He met Mrs. Brown.", "She smiled!"]
 
 
 def test_pick_avoids_repeats_and_returns_spares(story_writer, monkeypatch):

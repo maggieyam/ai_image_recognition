@@ -10,7 +10,7 @@ from emotiefflib.facial_analysis import EmotiEffLibRecognizer
 EMOTION_MODEL = "enet_b0_8_va_mtl"
 
 
-class EmotionRecognizer:
+class FaceEmotion:
     def __init__(self):
         self.model = EmotiEffLibRecognizer(engine="onnx", model_name=EMOTION_MODEL)
 

@@ -4,7 +4,7 @@ import json
 import random
 import re
 
-from sentences import split_sentences
+from brain.language.sentences import split_sentences
 
 # Each step tries twice. A prompt that fails twice tends to keep failing the
 # same way, so after that the step gives up and the page moves on to a
@@ -173,7 +173,7 @@ class StoryWriter:
     """
 
     def __init__(self, qwen):
-        """qwen: the shared llm.Qwen."""
+        """qwen: the brain's Qwen (networks/qwen.py); the caller holds it for each plan or story."""
         self.qwen = qwen
 
     def plan(self, description, mood, count=MAX_IDEAS, match=None, genre=None):

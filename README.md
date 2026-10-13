@@ -4,27 +4,23 @@ Find out what's in a picture. Upload an image or paste a screenshot, and get a s
 
 ## How to use
 
-1. Add an image in either of two ways:
-   - **Upload** a file from your device
-   - **Paste** from your clipboard with Ctrl/Cmd+V, for example a screenshot
-2. Click **Describe image**.
-3. Read what the app says, shown a part at a time as it thinks: what it saw, how the people in the picture feel (if there are any), how the picture makes it feel, with its top three moods (e.g. "lonely 50% · gloomy 12% · peaceful 8%"), and an offer to write you a story. The first part appears after about 15 seconds on a laptop, and the rest over the next 10.
-4. Optionally pick a mood and one of the three genres offered, choose how many ideas you want (1–3), and click **Brainstorm story ideas**. Each idea is a short story pitch in that mood and genre: a title, the main characters, the premise, what they want, what's in their way, the storyline and a first line. The genres offered are drawn at random from a list that includes time travel and being transported into a story. Fewer ideas come back faster. On a laptop, expect about half a minute to brainstorm and another 15–30 seconds per idea. If an idea can't be written, another one takes its place. Open **What was considered** to see the detailed description the ideas started from, and any ideas that were thrown out for not matching the picture.
+1. Upload an image, or paste one with Ctrl/Cmd+V.
+2. Click **Describe image**. What the app says appears a part at a time: what it saw, how the people in the picture look (if there are any), how the picture makes it feel, with its top three moods, and an offer to write you a story. On a laptop the first part takes about 15 seconds.
+3. Optionally pick a mood and a genre and click **Brainstorm story ideas** for 1–3 short story pitches. Expect about half a minute, plus 15–30 seconds per idea.
+4. Optionally press **Speak out loud** to hear it as well. The button is only there when you run the app yourself on a computer with a speaker, and the voice comes out of that computer.
 
 ## Good to know
 
-- **Descriptions are one sentence**, like a caption for a photo: "A mother bear and her two cubs on a rocky hillside." They can still get details wrong, especially small objects and who is doing what.
-- **How the people feel is read from their faces.** The app looks for faces in every picture and reads only the main characters', not people in the background. Animals and statues often get a reading too, as a guess at how their face looks. A face that's hidden or turned away can't be read. It's a guess about how someone looks, not a fact about how they feel.
-- **Moods are the app's own reaction to the picture**, not a fact about it. Like a person, it can feel differently about a scene than you do. Its feelings come from a fixed list (happy, peaceful, lonely, busy, tense, …), and the percentages show which ones come through most, compared with the others on the list. For now it reacts the same way every time it sees the same picture. Expect some surprising reactions, e.g. lots of red can feel "romantic".
-- **Story ideas are made up.** They start from a detailed description of the picture and the mood you picked. The characters and plot are invented, and are meant to be original rather than borrowed from existing stories, though a small model doesn't always manage that.
-- **Supported images:** common formats such as JPG and PNG, up to 16 MB. Very large images are shrunk before analysis.
-- **Fair-use limits:** 10 requests per minute and 100 per day per visitor, so the free demo stays available to everyone.
-- **The first request after a quiet period can be slow** while the demo wakes up.
-- **Your images aren't saved.** They're processed in memory to produce the description.
+- **It can be wrong.** Descriptions are one-sentence captions, and can miss small objects or who is doing what.
+- **How people feel is read from their faces**, and only the main characters'. It's a guess about how someone looks, not a fact about how they feel.
+- **Moods are the app's own reaction**, picked from a fixed list. It can feel differently about a picture than you do.
+- **Story ideas are made up**, starting from the picture and the mood you picked.
+- **Images:** common formats such as JPG and PNG, up to 16 MB. They aren't saved.
+- **Free demo limits:** 10 requests per minute and 100 per day per visitor. The first request after a quiet period can be slow.
 
 ## Run it yourself
 
-Everything runs on your own computer, so there are no usage limits and your images never leave your machine.
+Everything runs on your own computer, so there are no limits and your images never leave it.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -32,27 +28,40 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Open http://127.0.0.1:8000. The first run downloads about 2.2 GB of model weights. A GPU is used automatically if you have one; otherwise it runs on CPU.
+Open http://127.0.0.1:8000. Installing compiles llama.cpp, which takes a few minutes, and the first run downloads about 2.3 GB of model weights. A GPU is used if you have one.
 
-Installing `llama-cpp-python` compiles llama.cpp, which takes a few minutes.
+> **Intel Mac:** `requirements.txt` pins `transformers<5` and `numpy<2`, because PyTorch's last build for Intel Macs is 2.2.2.
 
-> **Intel Mac:** PyTorch's last macOS x86_64 build is 2.2.2, which is why `requirements.txt` pins `transformers<5` and `numpy<2` on Intel Macs. On torch older than 2.6 the CLIP weights are converted once into a local `models/` folder.
-
-To serve it to other people, run it with gunicorn instead of `python app.py`:
+To serve it to other people, use gunicorn with one worker, since each worker loads its own copy of the models:
 
 ```bash
 SECRET_KEY=change-me gunicorn -w 1 --threads 4 -b 0.0.0.0:8000 app:app
 ```
 
-Keep it to one worker: each worker loads its own 2.2 GB of models, and rate limits are counted per worker. Threads let pictures be described while a story is being written; if the story writer has Qwen for more than a few seconds, the app says plain sentences about the picture instead of waiting. `SECRET_KEY` signs the story ideas the server hands out; without it, a random key is made at startup and ideas planned before a restart can't be written.
+| Setting | What it does |
+|---|---|
+| `SECRET_KEY` | Signs the story ideas the server hands out. Without it, ideas planned before a restart can't be written. |
+| `SPEAK_ALOUD=1` | Lets a served app speak through its machine's speaker, for a robot, say. It's off under gunicorn otherwise, because any visitor could make that machine talk. |
+| `VOICE` | The voice it speaks in: `piper`, the only one so far. |
+| `PORT` | The port `python app.py` listens on (8000). |
 
-To run the tests (no models needed): `pip install pytest && pytest`.
+On Linux, speaking out loud needs PortAudio: `sudo apt install libportaudio2`.
 
-To try the models from the command line: `python -m brain images/*.jpg` prints each image's caption, moods and detailed description.
+- **Tests** (no models needed): `pip install pytest && pytest`
+- **Command line:** `python -m brain images/*.jpg` prints each image's caption, moods and description.
 
-## About
+## How it works
 
-Descriptions are generated by [Florence-2](https://huggingface.co/florence-community/Florence-2-base) from Microsoft: the caption is the first sentence of its most detailed description, which is more accurate than its short-caption mode. Moods are scored zero-shot by [CLIP](https://huggingface.co/openai/clip-vit-base-patch32) from OpenAI: the image is compared against text prompts such as "a lonely scene" (see `MOODS` in `brain/affect/mood.py`). Story ideas come from [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF), 4-bit, run with [llama.cpp](https://github.com/abetlen/llama-cpp-python) (`brain/imagination/story.py`). Rather than one big prompt, it works in small steps: the genre the user picks plus ideas for who is in the photo, brainstormed from Florence-2's detailed description and checked against the image with CLIP, then the model picks the best combinations and writes each one in a fresh prompt. How people feel is recognized one system at a time, with code doing the orchestration (`brain/perception/faces.py`): [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) from OpenCV finds the main characters by their faces (Florence-2 looks again when it misses a close-up), Florence-2 says who each one is, a pretrained facial-emotion model ([EmotiEffLib](https://github.com/sb-ai-lab/EmotiEffLib), trained on AffectNet; `brain/networks/face_emotion.py`) reads each face, and Qwen puts the results into words without ever seeing the picture. What the app says is written by Qwen in one reply, from one prompt that keeps the parts apart (`brain/language/speech.py`), and each part is sent to the page as soon as it's written.
+| Job | Model | Code |
+|---|---|---|
+| Describing the picture | [Florence-2](https://huggingface.co/florence-community/Florence-2-base) | `brain/perception/sight.py` |
+| Feeling a mood | [CLIP](https://huggingface.co/openai/clip-vit-base-patch32), zero-shot | `brain/affect/mood.py` |
+| Finding the main characters' faces | [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) | `brain/perception/faces.py` |
+| Reading each face | [EmotiEffLib](https://github.com/sb-ai-lab/EmotiEffLib) | `brain/networks/face_emotion.py` |
+| Putting it into words, and story ideas | [Qwen2.5-1.5B](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF), 4-bit, on [llama.cpp](https://github.com/abetlen/llama-cpp-python) | `brain/language/speech.py`, `brain/imagination/story.py` |
+| Speaking out loud | [Piper](https://github.com/OHF-Voice/piper1-gpl), in a voice trained on public-domain [LJ Speech](https://keithito.com/LJ-Speech-Dataset/) | `brain/networks/piper.py`, `effectors/mouth.py` |
+
+Qwen never sees the picture: it only words what the other models found. Story ideas are brainstormed from Florence-2's description, checked against the picture with CLIP, then written one at a time.
 
 ## How the code is organised
 
@@ -60,11 +69,12 @@ The code is laid out like the parts of a mind, so a new ability can be added wit
 
 ```
 senses/          eye.py                    takes in the picture; no model, no understanding
+effectors/       mouth.py                  says things through the speaker; no model, no language
 brain/
   workspace.py                             what the brain has in mind about one picture
   faculty.py                               what every faculty looks like, and running them in turn
   brain.py                                 loads the networks, lists the faculties
-  networks/      florence.py  clip.py  yunet.py  face_emotion.py  qwen.py     the models, each loaded once
+  networks/                                the models, each loaded once; voices.py lists the voices
   perception/    sight.py  faces.py        what's in the picture, who, and how they look
   affect/        mood.py                   how the picture makes the app feel
   language/      speech.py  sentences.py   putting what it has to say into words
@@ -73,9 +83,9 @@ app.py                                     the web server: requests, limits, sig
 web/                                       the page
 ```
 
-Each **faculty** is one specialist (`Sight`, `ReadFaces`, `Mood`, `Speak`). It declares what it `needs` and what it `gives`, and faculties never call each other: they read from and post to a shared **workspace**. `brain.py` runs them in order for each picture: it perceives and feels, then speaks.
+Each **faculty** is one specialist (`Sight`, `ReadFaces`, `Mood`, `Speak`). It declares what it `needs` and what it `gives`, and faculties never call each other: they read from and post to a shared **workspace**. A faculty is skipped when something it needs isn't there.
 
-To add an ability, write a faculty and add it to the list in `build_faculties` (`brain/brain.py`):
+To add an ability, write a faculty and add it to `build_faculties` in `brain/brain.py`:
 
 ```python
 class Mood(Faculty):
@@ -86,10 +96,9 @@ class Mood(Faculty):
         workspace.post(moods=self.moods(workspace["image"]))
 ```
 
-A faculty is skipped when something it needs isn't there, so one that needs a new sense (sound, say) doesn't get in the way of pictures. When the app starts, it checks that everything each faculty needs is given by a sense or by a faculty before it.
+To add a voice, write a class with a `sounds(text)` method in `brain/networks/` and list it in `brain/networks/voices.py`. `VOICE=<its name>` then switches to it.
 
-The layout follows a few ideas about how brains are organised: specialists that share their results through one workspace ([global workspace theory](https://en.wikipedia.org/wiki/Global_workspace_theory)), sensing kept apart from perceiving, finding a face kept apart from reading its expression, and deciding what to say kept apart from wording it. It's an analogy to organise code by, not a model of a brain: faculties run in a fixed order, and nothing is remembered between pictures.
+The layout borrows from [global workspace theory](https://en.wikipedia.org/wiki/Global_workspace_theory). It's an analogy to organise code by, not a model of a brain: faculties run in a fixed order, and nothing is remembered between pictures.
 
 ## Example
 <img width="614" height="896" alt="image" src="https://github.com/user-attachments/assets/e27ef025-d9ee-419f-90c3-6d47641ceed6" />
-

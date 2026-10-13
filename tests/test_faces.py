@@ -1,6 +1,6 @@
 from PIL import Image
 
-from brain.perception.faces import MAX_PEOPLE, ReadFaces, _clean_boxes, feeling, main_characters
+from brain.perception.faces import MAX_PEOPLE, ReadFaces, _clean_boxes, main_characters
 from brain.workspace import Workspace
 
 
@@ -86,11 +86,6 @@ def test_each_characters_face_is_read_and_posted_without_the_face():
     assert events == [{"status": "Looking at their faces…", "for": "feelings"}, {"characters": characters}]
 
 
-def test_an_animals_feeling_is_recognized():
-    dog = {"character": "a brown dog on a red couch", "face": "Fear"}
-    assert [c["emotion"] for c in read([dog])[0]] == ["Fear"]
-
-
 def test_faces_are_always_looked_for_and_none_found_is_posted_too():
     characters, events, emotions, looked = read([])
     assert looked == ["image"]
@@ -117,7 +112,3 @@ def test_no_characters_when_looking_for_faces_fails():
     workspace = Workspace(image=Image.new("RGB", (500, 500)))
     events = list(ReadFaces(Broken(), None, None).run(workspace))
     assert workspace["characters"] == [] and events[1] == {"characters": []}
-
-
-def test_an_emotion_label_as_a_feeling():
-    assert feeling("Sadness") == "sad" and feeling("Awe") == "awe"

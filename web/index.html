@@ -118,8 +118,8 @@ async function shrink(file) {
   return blob ? new File([blob], "image.jpg", { type: "image/jpeg" }) : file;
 }
 
-// What the app says about the picture, in its own words, shown while it's
-// being written (each sentence is its own Qwen call): what it saw, how the
+// What the app says about the picture, in its own words, each section shown
+// as soon as it's written (while Qwen writes the next): what it saw, how the
 // characters feel (only when it finds any), how it feels, and the story it
 // offers to write. The mood chips pick the story's mood and the genre chips
 // its genre (first one by default). `file` is the image that was described;

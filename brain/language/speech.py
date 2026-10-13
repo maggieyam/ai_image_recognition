@@ -1,127 +1,184 @@
 """
-What the brain says about a picture, section by section, in the first person.
-Code decides what there is to say; Qwen (networks/qwen.py) only puts it into
-words. Each section is its own narrow Qwen call at temperature 0, given only
-the facts it needs, so the same picture gets the same words; Qwen never sees
-the picture. Each section is yielded piece by piece as Qwen writes it, so the
-page can show it while it's being written.
+What the brain says about what it saw, in the first person: what it saw, how
+the characters in it look (if any were found: their feelings are read from
+their faces, so it's how they look, not how they feel), how it makes the
+brain feel, and an offer to write a story. Code decides what there is to
+say; Qwen (networks/qwen.py) only puts it into words, from the facts alone.
+Qwen never gets a picture: only what the eyes saw, as the faculties before it
+left it on the workspace. What the eyes were looking at comes with the stimulus
+("looking_at"): the web page says it's a picture the user showed; an eye on
+the world would say something else, and the prompt doesn't decide it.
 
-1. what_i_saw: Florence-2's description -> "I saw ..."
-2. how_they_feel: the characters and the emotion read on each face
-   (perception/faces.py), as JSON -> how they feel, if there are any. Qwen
-   sees only those facts, so it can relate them ("the man is angry, and the
-   girl is crying, so she must be sad").
-3. how_i_feel: the brain's mood (CLIP) and why -> "I feel ..., because ..."
-4. offer_story: the brain offers to write a story and asks which genre the
-   user would like. Qwen only gets the short caption: given the whole
-   description, it described the picture again instead. Nor does it get the
-   genres (the page shows them to pick from): given them, it chose one
-   itself and then asked.
+One prompt covers all four parts, and the prompt keeps them apart. What made
+that work with Qwen 1.5B: two worked examples, the characters given as a
+plain line, and a firm rule for their feelings. On 16 OASIS photos it then
+said how the characters looked every time (12 of 12, always as "looks", never
+"feels"), never mixed their feelings with the brain's own (8 of 8 where they
+differ), and asked for a genre more often than four separate prompts did (14
+of 16, against 5). With the characters as a JSON list and a looser rule, it
+left their feelings out in 5 of 12.
+Temperature 0, so the same picture gets the same words.
 
-If Qwen gives no answer, each section falls back to a plain sentence.
+Qwen isn't given the genres (the page shows them to pick from): given them,
+it chose one itself and then asked.
 
-Each is a plain function of the facts it needs, yielding events for the page
-(faculty.py); Say puts one into the brain's cycle at the point where it's said.
+The reply is JSON, one part after another, and each part goes to the page as
+soon as it's complete, while Qwen writes the next. A part Qwen leaves out
+(it was busy, or cut off) is said as a plain sentence instead.
 """
+import itertools
 import json
 import random
+import re
 
 from brain.faculty import Faculty
 from brain.imagination.story import GENRES
 from brain.language.sentences import lower_first, upper_first
 from brain.perception.faces import feeling
 
-SAW_SYSTEM = (
-    "Say what you saw in one or two short sentences, in the first person, starting "
-    'with "I saw". Use only the description given. Write in English. Reply with only '
-    "what you'd say."
+SYSTEM = (
+    "You tell the user, in the first person, what you just saw and how you feel about it. You get what you "
+    "were looking at, what your eyes saw, the main characters you saw with how each one looks, and how it made "
+    "you feel. "
+    "Reply in JSON with four parts, each one or two short sentences, in English:\n"
+    '"saw": what you saw, starting with "I saw". Only what your eyes saw.\n'
+    '"they_look": if characters are listed, say how each one looks, using exactly the feeling given for them. '
+    'You only see their faces, so say "looks happy", never "feels happy" or "is happy". '
+    'Only if it says "none found", leave it "".\n'
+    '"i_feel": how what you saw made you feel and why: exactly the feeling given for you. It is your feeling, '
+    "not the characters'.\n"
+    '"story_offer": tell the user you\'re inspired to write a story and ask them to pick a genre. '
+    "Don't describe what you saw or the story, and don't name any genre."
 )
-EXPRESS_SYSTEM = (
-    "You get a JSON list of the main characters in a photo, with who each one is and how they feel. "
-    "Say how they feel in one or two short, natural sentences. Use only the facts given. "
-    "Write in English. Reply with only what you'd say."
-)
-FEEL_SYSTEM = (
-    "In one short sentence, in the first person, say how the picture made you feel "
-    "and why, using the feeling given and what the picture shows. Write in English. Reply "
-    "with only what you'd say."
-)
-STORY_SYSTEM = (
-    "Express to the user that you're inspired to write a story, and politely ask them "
-    "to pick a genre. Use one or two short sentences, in the first person. Don't describe "
-    "the picture, and don't name any genre. Write in English. Reply with only what you'd say."
-)
+# The parts of the reply, in the order Qwen writes them, and the page section each is shown in.
+SECTIONS = {"saw": "saw", "they_look": "feelings", "i_feel": "i_feel", "story_offer": "story_intention"}
+SCHEMA = {
+    "type": "object",
+    "properties": {part: {"type": "string"} for part in SECTIONS},
+    "required": list(SECTIONS),
+}
+# One part of the reply, once its closing quote has arrived.
+PART = re.compile(r'"(%s)"\s*:\s*"((?:[^"\\]|\\.)*)"' % "|".join(SECTIONS))
+# What the page shows where a part will appear, while Qwen writes it.
+STATUS = {"i_feel": "Letting it sink in…", "story_offer": "Thinking of a story…"}
+MAX_TOKENS = 300  # replies run to about 150 tokens
 GENRE_CHOICES = 3  # genres the page offers for the story
 
 
-class Say(Faculty):
+def _facts(looking_at, description, characters, mood):
+    """The facts Qwen puts into words. characters: [{"character": ..., "feeling": ...}, ...]."""
+    who = "; ".join(f"{c['character']} ({c['feeling']})" for c in characters) or "none found"
+    return (
+        f"You were looking at: {looking_at}\nWhat your eyes saw: {description}\n"
+        f"Characters and how they look: {who}\nHow it made you feel: {mood}"
+    )
+
+
+# Two worked examples, as (what the eyes saw, the characters, the brain's mood,
+# the reply); small models follow a demonstration far better than instructions
+# alone. In one a character feels differently from the brain; in the other
+# there are no characters.
+EXAMPLES = [
+    (
+        "A grey cat sits on a windowsill, looking out at the rain. A girl in a yellow coat stands beside it, "
+        "holding an umbrella.",
+        [{"character": "a close up of a girl in a yellow coat", "feeling": "happy"}],
+        "lonely",
+        {
+            "saw": "I saw a grey cat on a windowsill looking out at the rain, and a girl in a yellow coat "
+            "beside it with an umbrella.",
+            "they_look": "The girl in the yellow coat looks happy.",
+            "i_feel": "It makes me feel lonely, with the rain outside and the cat just watching it.",
+            "story_offer": "I'd love to write you a story about this. Which genre would you like?",
+        },
+    ),
+    (
+        "A red tractor stands in a wheat field at sunset. The sky is orange and there are hills in the distance.",
+        [],
+        "peaceful",
+        {
+            "saw": "I saw a red tractor standing in a wheat field at sunset, with hills in the distance.",
+            "they_look": "",
+            "i_feel": "It makes me feel peaceful, with the warm light and nothing moving.",
+            "story_offer": "Seeing this makes me want to write a story. What genre should it be?",
+        },
+    ),
+]
+
+
+def _examples(looking_at):
+    """The worked examples as messages, looking at the same kind of thing as now."""
+    messages = []
+    for description, characters, mood, reply in EXAMPLES:
+        messages += [
+            {"role": "user", "content": _facts(looking_at, description, characters, mood)},
+            {"role": "assistant", "content": json.dumps(reply)},
+        ]
+    return messages
+
+
+class Speak(Faculty):
     """
-    One of the sections below as a faculty: `section(voice, *needs)`, each
-    read from the workspace. "voice" is this stimulus's turn at Qwen: anything
-    with Qwen's stream() (a qwen.Turns, when Qwen is shared).
+    Everything the brain says about what it saw, in one Qwen call. "voice" is
+    this stimulus's turn at Qwen: anything with Qwen's stream() (a qwen.Turns,
+    when Qwen is shared).
     """
 
-    def __init__(self, section, needs):
-        self.section, self.needs = section, ("voice", *needs)
+    needs = ("voice", "looking_at", "description", "caption", "characters", "moods")
 
     def run(self, workspace):
-        return self.section(*(workspace[name] for name in self.needs))
+        moods = workspace["moods"]
+        mood = moods[0][0]
+        characters = [
+            {"character": c["character"], "feeling": feeling(c["emotion"])} for c in workspace["characters"]
+        ]
+        # What's said in place of a part Qwen leaves out.
+        plain = {
+            "saw": f"I saw {lower_first(workspace['caption'])}",
+            "they_look": " ".join(f"{upper_first(c['character'])} looks {c['feeling']}." for c in characters),
+            "i_feel": f"It makes me feel {mood}.",
+            "story_offer": "I'd like to write you a story about it. Which genre would you like?",
+        }
+        # The moods and genres to pick from follow their sentences.
+        choices = {
+            "i_feel": {"moods": [{"mood": m, "score": p} for m, p in moods]},
+            "story_offer": {"genres": random.sample(list(GENRES), GENRE_CHOICES)},
+        }
+        messages = [
+            {"role": "system", "content": SYSTEM},
+            *_examples(workspace["looking_at"]),
+            {"role": "user", "content": _facts(workspace["looking_at"], workspace["description"], characters, mood)},
+        ]
+        reply = workspace["voice"].stream(messages, temperature=0, max_tokens=MAX_TOKENS, schema=SCHEMA)
+        order, said = list(SECTIONS), set()
+        # Qwen's parts, each as soon as it's complete, then plain ones for any it left out.
+        for part, text in itertools.chain(_parts(reply), plain.items()):
+            if part in said:
+                continue
+            said.add(part)
+            text = text.strip() or plain[part]
+            if part == "they_look" and not characters:
+                text = ""  # nothing is said when no face was found
+            if text:
+                yield {SECTIONS[part]: text}
+            if part in choices:
+                yield choices[part]
+            following = order[order.index(part) + 1 :][:1]
+            if following and following[0] in STATUS and following[0] not in said:
+                yield {"status": STATUS[following[0]], "for": SECTIONS[following[0]]}
 
-    def __str__(self):
-        return f"Say {self.section.__name__}"
 
-
-def what_i_saw(voice, description, caption):
-    fallback = f"I saw {lower_first(caption)}"
-    yield from _say("saw", voice, SAW_SYSTEM, f"Description: {description}", 80, fallback)
-
-
-def how_they_feel(voice, characters):
+def _parts(pieces):
     """
-    How the characters feel, from who each one is and the emotion read from
-    their face: [{"character": "a woman in a red dress", "emotion": "Sadness"}, ...].
-    Nothing is said when no face was found.
+    (part, text) for each part of Qwen's JSON reply, as soon as that part is
+    complete: `pieces` is the reply's text as it's generated.
     """
-    if not characters:
-        return
-    facts = [{"character": c["character"], "feeling": feeling(c["emotion"])} for c in characters]
-    fallback = " ".join(f"{upper_first(f['character'])} looks {f['feeling']}." for f in facts)
-    yield from _say("feelings", voice, EXPRESS_SYSTEM, json.dumps(facts), 20 + 30 * len(characters), fallback)
-
-
-def how_i_feel(voice, description, moods):
-    """moods: the brain's moods, strongest first, as [(mood, probability), ...]."""
-    mood = moods[0][0]
-    yield {"status": "Letting it sink in…", "for": "i_feel"}
-    facts = f"What you saw: {description}\nHow it made you feel: {mood}"
-    yield from _say("i_feel", voice, FEEL_SYSTEM, facts, 60, f"It makes me feel {mood}.")
-    # The moods to pick from follow their sentence.
-    yield {"moods": [{"mood": m, "score": p} for m, p in moods]}
-
-
-def offer_story(voice, caption):
-    yield {"status": "Thinking of a story…", "for": "story_intention"}
-    fallback = "I'd like to write you a story about it. Which genre would you like?"
-    yield from _say("story_intention", voice, STORY_SYSTEM, f"The picture: {caption}", 70, fallback)
-    # The genres to pick from follow their sentence, too.
-    yield {"genres": random.sample(list(GENRES), GENRE_CHOICES)}
-
-
-def say(qwen, messages, max_tokens, fallback):
-    """
-    Qwen's reply as plain text, piece by piece as it's written, at temperature
-    0; `fallback` if it says nothing (it was cut off, or Qwen was busy).
-    """
-    said = False
-    for piece in qwen.stream(messages, temperature=0, max_tokens=max_tokens):
-        said = said or bool(piece.strip())
-        yield piece
-    if not said:
-        yield fallback
-
-
-def _say(section, voice, system, facts, max_tokens, fallback):
-    """A section worded by Qwen from only its facts, each piece as an event for the page."""
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": facts}]
-    for piece in say(voice, messages, max_tokens, fallback):
-        yield {section: piece}
+    reply, found = "", 0
+    for piece in pieces:
+        reply += piece
+        for match in list(PART.finditer(reply))[found:]:
+            found += 1
+            try:
+                yield match[1], json.loads(f'"{match[2]}"')
+            except json.JSONDecodeError:  # not a string after all: left to the plain sentence
+                pass

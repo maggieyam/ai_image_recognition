@@ -15,7 +15,7 @@ class Faculty:
         A faculty with something for whoever is listening (the page) yields
         it as events, plain dicts that can be sent as JSON:
         - what it found: {"caption": ..., "description": ...};
-        - a piece of something it's saying, under its section: {"saw": piece};
+        - something it says, under its section: {"saw": "I saw a grey cat."};
         - what it's doing meanwhile, shown where a section will appear:
           {"status": "Looking at their faces…", "for": "feelings"}.
         """

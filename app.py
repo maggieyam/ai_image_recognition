@@ -78,8 +78,8 @@ def analyze():
     """
     What the app makes of a picture, streamed as JSON lines so the page can
     show each part as soon as it's ready: the caption and description, then
-    what the app says, section by section, each as Qwen writes it
-    ({"saw": piece}, {"feelings": piece}, ...). Before a section, a status
+    what the app says, section by section, each once Qwen has written it
+    ({"saw": "I saw ..."}, {"feelings": ...}, ...). Before a section, a status
     says what the app is doing ({"status": "Letting it sink in…", "for":
     "i_feel"}); the moods and genres to pick from follow their sentences.
     The last line is {"done": true}, or {"error": ...} if something failed.
@@ -91,7 +91,8 @@ def analyze():
     def lines():
         # Once streaming has started, errors can't change the status code.
         try:
-            for event in brain.perceive(image=image):
+            # Coming from the page, it's a picture; the brain can't tell that by looking.
+            for event in brain.perceive(image=image, looking_at="a picture the user showed you"):
                 yield json.dumps(event) + "\n"
             yield json.dumps({"done": True}) + "\n"
         except Exception:

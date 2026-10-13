@@ -10,7 +10,7 @@ sense is skipped whenever that sense took in nothing.
 from brain.affect.mood import MOODS, Mood
 from brain.faculty import check_wiring, run
 from brain.imagination.story import GENRES, MAX_IDEAS, StoryWriter
-from brain.language.speech import Say, how_i_feel, how_they_feel, offer_story, what_i_saw
+from brain.language.speech import Speak
 from brain.networks.clip import Clip
 from brain.networks.face_emotion import FaceEmotion
 from brain.networks.florence import Florence
@@ -23,27 +23,27 @@ from brain.workspace import Workspace
 # What the web server needs besides the Brain: Busy, and what it checks requests against.
 __all__ = ["Brain", "Busy", "GENRES", "MAX_IDEAS", "MOODS"]
 
-SENSES = ("image",)  # what a stimulus can be made of
+# What a stimulus is made of: what the eyes took in, and what they were
+# looking at ("a picture the user showed you"), which only whoever passes it
+# in can know.
+STIMULUS = ("image", "looking_at")
 STORY_WAIT = 30  # seconds a story waits for Qwen before Busy
 # Seconds what the brain says about a stimulus waits for Qwen (busy writing a
-# story) before its sentences fall back to plain ones; it waits once per
-# stimulus, and perceiving never fails on it.
+# story) before it's said in plain sentences instead; perceiving never fails
+# on it.
 SPEECH_WAIT = 5
 
 
 def build_faculties(florence, clip, yunet, face_emotion):
-    """What the brain makes of a stimulus, in the order the page shows it."""
+    """What the brain makes of a stimulus, in order: it perceives and feels, then speaks."""
     faculties = [
         Sight(florence),
         Mood(clip),
-        Say(what_i_saw, needs=("description", "caption")),
         ReadFaces(yunet, florence, face_emotion),
-        Say(how_they_feel, needs=("characters",)),
-        Say(how_i_feel, needs=("description", "moods")),
-        Say(offer_story, needs=("caption",)),
+        Speak(),
     ]
     # "voice" is this stimulus's turn at Qwen, which the brain adds itself.
-    check_wiring(faculties, SENSES + ("voice",))
+    check_wiring(faculties, STIMULUS + ("voice",))
     return faculties
 
 
@@ -60,9 +60,9 @@ class Brain:
 
     def perceive(self, **stimulus):
         """
-        What the brain makes of what the senses took in (image=<PIL image>),
-        as the events its faculties yield (faculty.py), each as soon as it's
-        ready.
+        What the brain makes of what the senses took in (image=<PIL image>,
+        looking_at="a picture the user showed you"), as the events its
+        faculties yield (faculty.py), each as soon as it's ready.
         """
         workspace = Workspace(voice=self.qwen.in_passing(SPEECH_WAIT), **stimulus)
         yield from run(self.faculties, workspace)

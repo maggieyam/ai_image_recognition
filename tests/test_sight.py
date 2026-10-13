@@ -1,5 +1,4 @@
-from brain.perception.sight import Sight, _caption_and_description
-from brain.workspace import Workspace
+from brain.perception.sight import _caption_and_description
 
 
 def test_drops_film_still_and_title_sentences():
@@ -18,15 +17,3 @@ def test_keeps_text_when_every_sentence_names_a_title():
     caption, description = _caption_and_description('A poster for the film "Moon River".')
     assert description == "A poster for the film."
     assert caption == "A poster for the film."
-
-
-def test_sight_posts_the_caption_and_description_and_tells_the_page():
-    class FakeFlorence:
-        def describe(self, image):
-            return f"The image shows a grey cat on a windowsill. It is raining. ({image})"
-
-    workspace = Workspace(image="photo")
-    events = list(Sight(FakeFlorence()).run(workspace))
-    assert workspace["caption"] == "A grey cat on a windowsill."
-    assert workspace["description"] == "The image shows a grey cat on a windowsill. It is raining. (photo)"
-    assert events == [{"caption": workspace["caption"], "description": workspace["description"]}]

@@ -1,33 +1,18 @@
 import json
 import os
-import random
-import threading
-from contextlib import contextmanager
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from itsdangerous import BadSignature, URLSafeTimedSerializer
-from PIL import Image, UnidentifiedImageError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from emotions import EmotionRecognizer
-from llm import Qwen, Turns
-from narrate import how_i_feel, story_intention, what_i_saw
-from recognize_feelings import feelings_events
-from recognizer import MOODS, ImageRecognizer
-from writer import GENRES, MAX_IDEAS, StoryWriter
+from brain.brain import GENRES, MAX_IDEAS, MOODS, Brain, Busy
+from senses import eye
 
-MAX_SIDE = 1600  # downscale big images; the model resizes anyway
 # Bound on the description the page sends back, to keep prompts small.
 MAX_DESCRIPTION = 2000  # detailed descriptions run to about 700 characters
-WRITER_WAIT = 30  # seconds a story request waits for the writer before "busy"
-# Seconds /analyze waits for Qwen (busy writing a story) before its sentences
-# fall back to plain ones; it waits once per request, and describing a picture
-# never fails on it.
-ANALYZE_WAIT = 5
 IDEA_SECONDS = 60 * 60  # how long a planned idea can still be written
-GENRE_CHOICES = 3  # genres the page offers for the story
 
 app = Flask(__name__, template_folder="web")
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB uploads
@@ -37,44 +22,12 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 limiter = Limiter(get_remote_address, app=app, storage_uri="memory://")
 
-recognizer = ImageRecognizer()
-emotions = EmotionRecognizer()
-qwen = Qwen()  # shared by the story writer, narrate and recognize_feelings
-writer = StoryWriter(qwen)
-# Qwen (llama.cpp) has a single context, so requests that use it take turns.
-# Florence-2 and CLIP are safe to run from several threads at once.
-writer_lock = threading.Lock()
-# Story requests waiting for Qwen. They go first: while one is waiting,
-# /analyze says plain sentences instead of taking Qwen (see llm.Turns).
-stories_waiting = 0
-stories_waiting_lock = threading.Lock()
+# Everything the app makes of a picture; this file is only its web server.
+brain = Brain()
 # Planned ideas are signed, so /story/write only writes what /story/plan
 # planned, not any text a client sends. With more than one server process,
 # set SECRET_KEY so an idea planned by one can be written by another.
 signer = URLSafeTimedSerializer(os.environ.get("SECRET_KEY") or os.urandom(32))
-
-
-class WriterBusy(Exception):
-    pass
-
-
-@contextmanager
-def writer_turn():
-    """Hold the story writer, or raise WriterBusy after WRITER_WAIT seconds."""
-    global stories_waiting
-    with stories_waiting_lock:
-        stories_waiting += 1
-    try:
-        got_it = writer_lock.acquire(timeout=WRITER_WAIT)
-    finally:
-        with stories_waiting_lock:
-            stories_waiting -= 1
-    if not got_it:
-        raise WriterBusy
-    try:
-        yield
-    finally:
-        writer_lock.release()
 
 
 @app.get("/")
@@ -92,11 +45,9 @@ def _read_image():
     if not upload or not upload.filename:
         return None, (jsonify(error="Choose or paste an image first."), 400)
     try:
-        image = Image.open(upload.stream).convert("RGB")
-    except (UnidentifiedImageError, Image.DecompressionBombError, OSError):
+        return eye.see(upload.stream), None
+    except eye.Unreadable:
         return None, (jsonify(error="That file isn't a readable image."), 400)
-    image.thumbnail((MAX_SIDE, MAX_SIDE))
-    return image, None
 
 
 def _read_mood(mood):
@@ -127,8 +78,8 @@ def analyze():
     """
     What the app makes of a picture, streamed as JSON lines so the page can
     show each part as soon as it's ready: the caption and description, then
-    what the app says, section by section, each as Qwen writes it
-    ({"saw": piece}, {"feelings": piece}, ...). Before a section, a status
+    what the app says, section by section, each once Qwen has written it
+    ({"saw": "I saw ..."}, {"feelings": ...}, ...). Before a section, a status
     says what the app is doing ({"status": "Letting it sink in…", "for":
     "i_feel"}); the moods and genres to pick from follow their sentences.
     The last line is {"done": true}, or {"error": ...} if something failed.
@@ -137,30 +88,13 @@ def analyze():
     if error:
         return error
 
-    def events():
-        caption, description = recognizer.describe(image)
-        yield {"caption": caption, "description": description}
-        moods = recognizer.moods(image)
-        turns = Turns(qwen, writer_lock, ANALYZE_WAIT, defer=lambda: stories_waiting > 0)
-        for piece in what_i_saw(turns, description, caption):
-            yield {"saw": piece}
-        # How the characters in the picture feel; nothing when no face is found.
-        yield from feelings_events(turns, recognizer, emotions, image)
-        yield {"status": "Letting it sink in…", "for": "i_feel"}
-        for piece in how_i_feel(turns, description, moods[0][0]):
-            yield {"i_feel": piece}
-        yield {"moods": [{"mood": m, "score": p} for m, p in moods]}
-        yield {"status": "Thinking of a story…", "for": "story_intention"}
-        for piece in story_intention(turns, caption):
-            yield {"story_intention": piece}
-        yield {"genres": random.sample(list(GENRES), GENRE_CHOICES)}
-        yield {"done": True}
-
     def lines():
         # Once streaming has started, errors can't change the status code.
         try:
-            for event in events():
+            # Coming from the page, it's a picture; the brain can't tell that by looking.
+            for event in brain.perceive(image=image, looking_at="a picture the user showed you"):
                 yield json.dumps(event) + "\n"
+            yield json.dumps({"done": True}) + "\n"
         except Exception:
             app.logger.exception("analyze failed")
             yield json.dumps({"error": "Something went wrong on the server. Please try again."}) + "\n"
@@ -188,15 +122,7 @@ def story_plan():
         return jsonify(error=f"Ask for 1 to {MAX_IDEAS} ideas."), 400
 
     description = description.strip()
-    image_vec = recognizer.image_vector(image)  # once, for every grounding check
-    with writer_turn():
-        plan = writer.plan(
-            description,
-            mood,
-            int(count),
-            match=lambda texts: recognizer.match(image_vec, texts),
-            genre=genre,
-        )
+    plan = brain.plan_stories(image, description, mood, int(count), genre)
     if plan is None:
         return jsonify(error="Couldn't come up with ideas that fit this picture. Try again."), 503
 
@@ -227,8 +153,7 @@ def story_write():
     except BadSignature:  # includes expired tokens
         return jsonify(error="That story idea isn't valid or has expired. Brainstorm again."), 400
 
-    with writer_turn():
-        seed = writer.write(planned["description"], planned["mood"], planned["idea"])
+    seed = brain.write_story(planned["description"], planned["mood"], planned["idea"])
     if seed is None:
         return jsonify(error="Couldn't write this story."), 422
     return jsonify(story=seed)
@@ -244,7 +169,7 @@ def too_big(_):
     return jsonify(error="That file is too large (16MB max)."), 413
 
 
-@app.errorhandler(WriterBusy)
+@app.errorhandler(Busy)
 def writer_busy(_):
     return jsonify(error="The story writer is busy with another request. Try again in a minute."), 503
 

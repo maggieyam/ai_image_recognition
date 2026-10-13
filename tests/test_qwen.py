@@ -1,15 +1,18 @@
 import threading
 import time
 
-from llm import Qwen, Turns, say
+import pytest
+
+from brain.networks.qwen import Busy, Qwen, SharedQwen, Turns
 
 
 class FakeQwen:
     def __init__(self, reply):
         self.reply, self.calls = reply, 0
 
-    def stream(self, messages, temperature, max_tokens):
+    def stream(self, messages, temperature, max_tokens, schema=None):
         self.calls += 1
+        self.schema = schema
         yield from self.reply
 
 
@@ -32,21 +35,6 @@ def test_turns_says_nothing_when_qwen_stays_busy():
     lock.acquire()  # the story writer has Qwen
     assert list(Turns(qwen, lock, wait=0.1).stream([], 0, 10)) == []
     assert qwen.calls == 0
-
-
-def test_say_falls_back_when_qwen_says_nothing():
-    assert "".join(say(FakeQwen([]), [], 10, "It makes me feel calm.")) == "It makes me feel calm."
-    assert "".join(say(FakeQwen(["I feel ", "calm."]), [], 10, "fallback")) == "I feel calm."
-
-
-def test_turns_waits_once_per_caller_then_stops_waiting():
-    lock = threading.Lock()
-    lock.acquire()  # the story writer has Qwen
-    turns = Turns(FakeQwen(["Hi"]), lock, wait=0.2)
-    start = time.monotonic()
-    for _ in range(3):
-        assert list(turns.stream([], 0, 10)) == []
-    assert time.monotonic() - start < 0.4  # one 0.2 s wait, not three
 
 
 def test_turns_lets_waiting_story_requests_go_first():
@@ -81,4 +69,38 @@ def test_a_story_request_that_starts_waiting_meanwhile_still_goes_first():
     turns = Turns(qwen, lock, wait=5, defer=lambda: next(checks, True))
     start = time.monotonic()
     assert list(turns.stream([], 0, 10)) == []
-    assert time.monotonic() - start < 1 and not turns.gave_up and qwen.calls == 0
+    assert time.monotonic() - start < 1 and qwen.calls == 0  # it made way at once, not after 5 s
+
+
+def test_a_story_holds_qwen_and_frees_it_afterwards():
+    shared = SharedQwen(FakeQwen(["Hi"]))
+    with shared.hold(wait=1):
+        assert shared.lock.locked() and shared.waiting == 0  # holding isn't waiting
+        assert list(shared.in_passing(wait=0.1).stream([], 0, 10)) == []  # a sentence can't cut in
+    assert list(shared.in_passing(wait=1).stream([], 0, 10)) == ["Hi"]
+
+
+def test_a_story_is_told_qwen_is_busy_once_it_has_waited():
+    shared = SharedQwen(FakeQwen(["Hi"]))
+    with shared.hold(wait=1):
+        with pytest.raises(Busy):
+            with shared.hold(wait=0.1):
+                pass
+        assert shared.waiting == 0
+    assert shared.lock.acquire(blocking=False)  # the story that gave up didn't take or free it
+
+
+def test_sentences_make_way_for_a_story_thats_waiting():
+    shared = SharedQwen(FakeQwen(["Hi"]))
+    sentences = shared.in_passing(wait=5)
+    shared.waiting = 1  # a story is waiting in hold()
+    start = time.monotonic()
+    assert list(sentences.stream([], 0, 10)) == []
+    assert time.monotonic() - start < 1 and shared.qwen.calls == 0
+
+
+def test_turns_passes_a_json_schema_on_to_qwen():
+    qwen = FakeQwen(['{"saw": ', '"a cat"}'])
+    turns = Turns(qwen, threading.Lock(), wait=1)
+    assert "".join(turns.stream([], 0, 10, schema={"type": "object"})) == '{"saw": "a cat"}'
+    assert qwen.schema == {"type": "object"}

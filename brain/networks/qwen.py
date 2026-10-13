@@ -1,13 +1,14 @@
 """
-Qwen, the small language model the app shares: the story writer, narrate and
-recognize_feelings all ask it questions, so it's loaded once. llama.cpp has a
-single context, so callers take turns (app.py's lock).
+Qwen, the small language model the brain shares: the story writer and
+everything the brain says ask it questions, so it's loaded once. llama.cpp
+has a single context, so callers take turns (SharedQwen).
 """
 import json
 import platform
 import queue
 import threading
 import time
+from contextlib import contextmanager
 
 from llama_cpp import Llama
 
@@ -37,18 +38,21 @@ class Qwen:
 
     def ask(self, messages, schema, temperature, max_tokens):
         """Qwen's reply as a dict matching the JSON schema, or None if cut off."""
-        # The schema becomes a grammar, so the reply is always well-formed
-        # JSON unless max_tokens or the time limit cuts it off.
-        response_format = {"type": "json_object", "schema": schema}
-        text = "".join(self._generate(messages, temperature, max_tokens, response_format))
+        text = "".join(self.stream(messages, temperature, max_tokens, schema))
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             return None
 
-    def stream(self, messages, temperature, max_tokens):
-        """Qwen's reply as plain text, yielded piece by piece as it's generated."""
-        yield from self._generate(messages, temperature, max_tokens)
+    def stream(self, messages, temperature, max_tokens, schema=None):
+        """
+        Qwen's reply, yielded piece by piece as it's generated: plain text,
+        or with a JSON schema, the text of JSON matching it.
+        """
+        # The schema becomes a grammar, so the reply is always well-formed
+        # JSON unless max_tokens or the time limit cuts it off.
+        response_format = {"type": "json_object", "schema": schema} if schema else None
+        yield from self._generate(messages, temperature, max_tokens, response_format)
 
     def _generate(self, messages, temperature, max_tokens, response_format=None):
         """The reply's text, piece by piece; streamed so the time limit can stop it."""
@@ -77,24 +81,22 @@ class Turns:
     Qwen for a caller that shares it with others (llama.cpp has one context):
     each reply is generated in a thread that holds `lock` only while Qwen
     writes, not while the caller sends the pieces on (to a slow client, say).
-    The reply is empty, so the caller can fall back to a plain sentence, when:
-    - `defer()` is true (others go first, e.g. a story request waiting);
-    - the lock isn't free within `wait` seconds. After that, this Turns stops
-      waiting: one wait per caller, not one per reply.
+    The reply is empty, so the caller can fall back to plain sentences, when:
+    - `defer()` is true (others go first, e.g. a story waiting in SharedQwen.hold);
+    - the lock isn't free within `wait` seconds.
     """
 
     def __init__(self, qwen, lock, wait, defer=lambda: False):
         self.qwen, self.lock, self.wait, self.defer = qwen, lock, wait, defer
-        self.gave_up = False
 
-    def stream(self, messages, temperature, max_tokens):
+    def stream(self, messages, temperature, max_tokens, schema=None):
         if not self._take_turn():
             return
         pieces = queue.Queue()
 
         def generate():
             try:
-                for piece in self.qwen.stream(messages, temperature, max_tokens):
+                for piece in self.qwen.stream(messages, temperature, max_tokens, schema):
                     pieces.put(piece)
             finally:
                 self.lock.release()
@@ -109,26 +111,53 @@ class Turns:
         Take the lock, waiting in short steps so a story request that starts
         waiting meanwhile still goes first (the lock itself isn't fair).
         """
-        if self.gave_up:  # already waited once: take Qwen only if it's free now
-            return not self.defer() and self.lock.acquire(blocking=False)
         deadline = time.monotonic() + self.wait
         while not self.defer():
             if self.lock.acquire(timeout=WAIT_STEP):
                 return True
             if time.monotonic() >= deadline:
-                self.gave_up = True
                 return False
         return False
 
 
-def say(qwen, messages, max_tokens, fallback):
+class Busy(Exception):
+    """Qwen stayed taken for longer than the caller could wait."""
+
+
+class SharedQwen:
     """
-    Qwen's reply as plain text, piece by piece as it's written, at temperature
-    0; `fallback` if it says nothing (it was cut off, or Qwen was busy).
+    Who gets Qwen next. Stories hold it for a whole plan or story, and go
+    first; what the brain says about a picture takes it for one reply, and
+    makes way while a story is waiting (see Turns).
     """
-    said = False
-    for piece in qwen.stream(messages, temperature=0, max_tokens=max_tokens):
-        said = said or bool(piece.strip())
-        yield piece
-    if not said:
-        yield fallback
+
+    def __init__(self, qwen):
+        self.qwen = qwen
+        # Qwen (llama.cpp) has a single context, so callers that use it take turns.
+        self.lock = threading.Lock()
+        self.waiting = 0  # callers waiting in hold()
+        self.waiting_lock = threading.Lock()
+
+    @contextmanager
+    def hold(self, wait):
+        """Hold Qwen, or raise Busy after `wait` seconds."""
+        with self.waiting_lock:
+            self.waiting += 1
+        try:
+            got_it = self.lock.acquire(timeout=wait)
+        finally:
+            with self.waiting_lock:
+                self.waiting -= 1
+        if not got_it:
+            raise Busy
+        try:
+            yield
+        finally:
+            self.lock.release()
+
+    def in_passing(self, wait):
+        """
+        Qwen for a caller that can do without it: a Turns that waits up to
+        `wait` seconds for it, and lets whoever is waiting in hold() go first.
+        """
+        return Turns(self.qwen, self.lock, wait, defer=lambda: self.waiting > 0)

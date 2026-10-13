@@ -12,8 +12,9 @@ from brain.brain import Busy
 class FakeBrain:
     """Stands in for the brain, so the web server is tested without any model."""
 
-    def __init__(self):
+    def __init__(self, mouth=None, voice=None):
         self.perceived, self.fails, self.busy = [], False, False
+        self.mouth, self.voice, self.said_aloud, self.hushed = mouth, voice, [], 0
 
     def perceive(self, **stimulus):
         self.perceived.append(stimulus)
@@ -26,6 +27,14 @@ class FakeBrain:
         if self.busy:
             raise Busy
         return {"title": f"{mood} {idea['genre']}"}
+
+    def say_aloud(self, text):
+        if self.mouth:
+            self.said_aloud.append(text)
+        return bool(self.mouth)
+
+    def hush(self):
+        self.hushed += 1
 
 
 @pytest.fixture
@@ -83,3 +92,42 @@ def test_the_page_is_told_when_the_brain_is_busy_with_another_story(web):
     token = web.signer.dumps({"description": "A grey cat.", "mood": "cozy", "idea": {"genre": "comedy"}})
     busy = web.app.test_client().post("/story/write", json={"token": token})
     assert busy.status_code == 503 and "busy" in busy.get_json()["error"]
+
+
+def test_served_to_others_the_app_has_no_mouth_unless_its_asked_to_speak(web):
+    assert web.brain.mouth is None
+    assert b"Speak out loud" not in web.app.test_client().get("/").data
+    spoke = web.app.test_client().post("/speak", json={"text": "I saw a grey cat."})
+    assert spoke.get_json() == {"aloud": False}
+
+
+def test_asked_to_speak_on_a_machine_with_a_speaker_the_page_offers_it(monkeypatch):
+    from effectors import mouth
+
+    monkeypatch.setenv("SPEAK_ALOUD", "1")
+    monkeypatch.setenv("VOICE", "piper")
+    monkeypatch.setattr(mouth, "find", lambda: "a mouth")
+    monkeypatch.setattr(brain.brain, "Brain", FakeBrain)
+    sys.modules.pop("app", None)
+    import app
+
+    try:
+        assert app.brain.mouth == "a mouth" and app.brain.voice == "piper"  # the voice asked for with VOICE
+        assert b"Speak out loud" in app.app.test_client().get("/").data
+    finally:
+        sys.modules.pop("app", None)
+
+
+def test_what_the_user_asks_to_hear_is_said_out_loud_and_a_hush_stops_it(web):
+    web.brain.mouth = "a mouth"
+    client = web.app.test_client()
+    spoke = client.post("/speak", json={"text": " I saw a grey cat. "})
+    assert spoke.get_json() == {"aloud": True} and web.brain.said_aloud == ["I saw a grey cat."]
+    assert client.post("/hush").status_code == 204 and web.brain.hushed == 1
+
+
+@pytest.mark.parametrize("text", [None, "", "   ", 7, "a" * 1001])
+def test_nothing_or_too_much_is_never_said_out_loud(web, text):
+    web.brain.mouth = "a mouth"
+    spoke = web.app.test_client().post("/speak", json={"text": text})
+    assert spoke.status_code == 400 and web.brain.said_aloud == []

@@ -34,6 +34,7 @@
   .chip[aria-pressed=true] { border-color:var(--accent); background:var(--accent); color:#fff; }
   .chip .pct { opacity:.7; margin-left:4px; }
   .say { margin:14px 0 0; }
+  .aloud { margin-top:12px; }
   /* What the app is doing before its next sentence, e.g. "Letting it sink in…". */
   .thinking { color:var(--muted); animation:pulse 1.4s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity:.35; } }
@@ -73,6 +74,12 @@
     <img id="preview" alt="Preview of the selected image">
 
     <button class="go" id="go" type="submit">Describe image</button>
+    {% if speaks %}
+    <div class="aloud">
+      <button type="button" class="chip" id="aloud" aria-pressed="false">Speak out loud</button>
+      <div class="hint">Says it through the speaker of the computer this app runs on.</div>
+    </div>
+    {% endif %}
   </form>
 
   <div id="result" class="card" aria-live="polite"></div>
@@ -126,6 +133,25 @@ async function shrink(file) {
 // brainstorming sends it again, with its description.
 const SECTIONS = ["saw", "feelings", "i_feel", "story_intention"];
 
+// Speaking out loud. The button is only on the page when the computer the app
+// runs on has a speaker, and pressing it is a hint to the app: while it's
+// pressed, each thing the app says is also said through that speaker (not
+// this device's). Pressed when the app has already spoken, it says what's on
+// the page so far; released, it stops mid-word.
+const aloud = $("aloud");
+const speaksAloud = () => aloud?.getAttribute("aria-pressed") === "true";
+const sayAloud = (text) => { if (text) post("/speak", { text }).catch(() => {}); };
+const hush = () => post("/hush", {}).catch(() => {});
+// What the app has said so far, without the statuses shown while it thinks.
+const saidSoFar = () => SECTIONS.map($)
+  .filter((el) => el && !el.hidden && !el.classList.contains("thinking"))
+  .map((el) => el.textContent).join(" ");
+if (aloud) aloud.onclick = () => {
+  const on = !speaksAloud();
+  aloud.setAttribute("aria-pressed", on);
+  if (on) sayAloud(saidSoFar()); else hush();
+};
+
 function startResult(file) {
   result.innerHTML = `<div class="caption thinking" id="saw">Looking at the picture…</div>`
     + `<p class="say" id="feelings" hidden></p>`
@@ -177,6 +203,7 @@ function startResult(file) {
       if (el.classList.contains("thinking")) { el.classList.remove("thinking"); el.textContent = ""; }
       el.hidden = false;
       el.textContent += event[key];
+      if (speaksAloud()) sayAloud(event[key]);
     }
   };
   // The story button only appears once everything has arrived; a stream that
@@ -301,6 +328,7 @@ form.onsubmit = async (e) => {
   e.preventDefault();
   let shown;
   $("go").disabled = true; $("go").textContent = "Analyzing…";
+  if (speaksAloud()) hush();  // it stops talking about the last picture
   result.innerHTML = '<span class="muted">Working… the first request can take a few seconds.</span>';
   try {
     const file = $("file").files[0] && await shrink($("file").files[0]);

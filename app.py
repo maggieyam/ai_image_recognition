@@ -8,11 +8,13 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from brain.brain import GENRES, MAX_IDEAS, MOODS, Brain, Busy
+from effectors import mouth
 from senses import eye
 
 # Bound on the description the page sends back, to keep prompts small.
 MAX_DESCRIPTION = 2000  # detailed descriptions run to about 700 characters
 IDEA_SECONDS = 60 * 60  # how long a planned idea can still be written
+MAX_SPOKEN = 1000  # characters said out loud at a time; everything said about a picture runs to about 600
 
 app = Flask(__name__, template_folder="web")
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB uploads
@@ -22,8 +24,14 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 limiter = Limiter(get_remote_address, app=app, storage_uri="memory://")
 
+# Speaking out loud comes out of this machine's speaker, whoever asks. Run as
+# `python app.py` only this machine can ask, so it's on if there's a speaker;
+# served to others (gunicorn), it's off unless SPEAK_ALOUD=1 (a robot, say).
+# VOICE picks the voice it speaks in, from brain/networks/voices.py.
+SPEAKS = __name__ == "__main__" or os.environ.get("SPEAK_ALOUD") == "1"
+
 # Everything the app makes of a picture; this file is only its web server.
-brain = Brain()
+brain = Brain(mouth=mouth.find() if SPEAKS else None, voice=os.environ.get("VOICE"))
 # Planned ideas are signed, so /story/write only writes what /story/plan
 # planned, not any text a client sends. With more than one server process,
 # set SECRET_KEY so an idea planned by one can be written by another.
@@ -32,7 +40,8 @@ signer = URLSafeTimedSerializer(os.environ.get("SECRET_KEY") or os.urandom(32))
 
 @app.get("/")
 def index():
-    response = app.make_response(render_template("index.html"))
+    # The page only offers to speak out loud when there's a mouth to do it with.
+    response = app.make_response(render_template("index.html", speaks=brain.mouth is not None))
     # Always fetch the current page: a cached copy talks to the server in an
     # outdated way after an update.
     response.headers["Cache-Control"] = "no-store"
@@ -157,6 +166,29 @@ def story_write():
     if seed is None:
         return jsonify(error="Couldn't write this story."), 422
     return jsonify(story=seed)
+
+
+@app.post("/speak")
+@limiter.limit("40 per minute; 400 per day")  # up to four things are said about each picture
+def speak():
+    """
+    The user would like to hear this out loud: a hint, which the brain takes
+    if it has a mouth. The sound comes out of the speaker of the machine the
+    app runs on, not the user's device, after anything still being said.
+    Answers at once, {"aloud": false} if there's no mouth.
+    """
+    text = (request.get_json(silent=True) or {}).get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_SPOKEN:
+        return jsonify(error="There's nothing to say out loud."), 400
+    return jsonify(aloud=brain.say_aloud(text.strip()))
+
+
+@app.post("/hush")
+@limiter.limit("40 per minute; 400 per day")
+def hush():
+    """Stop speaking out loud, mid-word, and drop what was still to be said."""
+    brain.hush()
+    return "", 204
 
 
 @app.errorhandler(429)

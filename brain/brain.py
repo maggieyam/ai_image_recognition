@@ -6,11 +6,15 @@ workspace, and each faculty in turn adds what it makes of it.
 To give the brain a new ability, write a Faculty (faculty.py) and list it in
 build_faculties; the other faculties stay as they are. One that needs a new
 sense is skipped whenever that sense took in nothing.
+
+What the brain says goes to whoever is listening as words. Given a mouth
+(effectors/mouth.py), it can also say them out loud when asked to.
 """
 from brain.affect.mood import MOODS, Mood
 from brain.faculty import check_wiring, run
 from brain.imagination.story import GENRES, MAX_IDEAS, StoryWriter
 from brain.language.speech import Speak
+from brain.networks import voices
 from brain.networks.clip import Clip
 from brain.networks.face_emotion import FaceEmotion
 from brain.networks.florence import Florence
@@ -48,7 +52,12 @@ def build_faculties(florence, clip, yunet, face_emotion):
 
 
 class Brain:
-    def __init__(self):
+    def __init__(self, mouth=None, voice=None):
+        """
+        mouth: what the brain speaks out loud through (effectors/mouth.py),
+        if this machine has one. voice: which of networks/voices.py it
+        speaks in, by name; None for the usual one.
+        """
         # Florence-2 and CLIP are safe to run from several threads at once;
         # Qwen isn't, so everything that uses it takes turns (SharedQwen).
         florence, clip, qwen = Florence(), Clip(), Qwen()
@@ -56,6 +65,10 @@ class Brain:
         self.qwen = SharedQwen(qwen)
         self.writer = StoryWriter(qwen)
         self.faculties = build_faculties(florence, clip, YuNet(), FaceEmotion())
+        # A brain with no mouth has no use for a voice, so none is loaded.
+        # (The voice box makes sound; the workspace's "voice" is a turn at Qwen.)
+        self.mouth = mouth
+        self.voicebox = voices.load(voice) if mouth else None
         print(f"Brain ready (device: {florence.device})")
 
     def perceive(self, **stimulus):
@@ -66,6 +79,22 @@ class Brain:
         """
         workspace = Workspace(voice=self.qwen.in_passing(SPEECH_WAIT), **stimulus)
         yield from run(self.faculties, workspace)
+
+    def say_aloud(self, text):
+        """
+        Say `text` out loud, after whatever is still being said, without
+        waiting for it to be heard. False if the brain has no mouth.
+        """
+        if not self.mouth:
+            return False
+        # Each sentence's sound is made when the mouth gets to it.
+        self.mouth.say(self.voicebox.sounds(text))
+        return True
+
+    def hush(self):
+        """Stop talking, mid-word, and drop what was still to be said."""
+        if self.mouth:
+            self.mouth.hush()
 
     def plan_stories(self, image, description, mood, count, genre=None):
         """

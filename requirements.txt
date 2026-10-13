@@ -12,3 +12,5 @@ flask-limiter
 gunicorn
 emotiefflib  # facial-emotion model (ONNX); weights download to ~/.emotiefflib
 opencv-python  # YuNet face detector; its model downloads to models/
+piper-tts  # the voice (GPL-3.0-or-later); its weights download to the Hugging Face cache
+sounddevice  # plays the voice on this machine's speaker; on Linux it needs PortAudio (apt install libportaudio2)

@@ -61,6 +61,7 @@ def brain_with(faces):
     brain = Brain.__new__(Brain)
     brain.clip, brain.qwen = FakeClip(), SharedQwen(FakeQwen())
     brain.faculties = build_faculties(FakeFlorence(), brain.clip, FakeYuNet(faces), FakeEmotions())
+    brain.mouth = brain.voicebox = None
     return brain
 
 
@@ -90,3 +91,35 @@ def test_the_brain_perceives_and_feels_then_says_it_all():
     }]
     assert next(e["moods"] for e in events if "moods" in e)[0]["mood"] == "playful"
     assert {"saw": "I saw a man."} in events and {"feelings": "He looks happy."} in events
+
+
+class FakeVoice:
+    def sounds(self, text):
+        yield f"the sound of {text!r}", 22050
+
+
+class FakeMouth:
+    def __init__(self):
+        self.said, self.hushed = [], 0
+
+    def say(self, sounds):
+        self.said.append(sounds)
+
+    def hush(self):
+        self.hushed += 1
+
+
+def test_with_a_mouth_the_brain_says_things_out_loud_in_its_voice_and_can_be_hushed():
+    brain = brain_with(faces=[])
+    brain.mouth, brain.voicebox = FakeMouth(), FakeVoice()
+    assert brain.say_aloud("I saw a man.") is True
+    (sounds,) = brain.mouth.said
+    assert list(sounds) == [("the sound of 'I saw a man.'", 22050)]
+    brain.hush()
+    assert brain.mouth.hushed == 1
+
+
+def test_without_a_mouth_the_brain_says_nothing_out_loud():
+    brain = brain_with(faces=[])
+    assert brain.say_aloud("I saw a man.") is False
+    brain.hush()  # nothing to stop
